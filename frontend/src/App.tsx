@@ -4,15 +4,16 @@ import { MultiScanner } from "./components/MultiScanner/MultiScanner";
 import { WatchPanel } from "./components/WatchPanel/WatchPanel";
 import { RealtimeChart } from "./components/Charts/RealtimeChart";
 
-type DragTarget = "left" | "colSplit" | "rowSplit" | null;
+type DragTarget = "left" | "right" | "colSplit" | "rowSplit" | null;
 
 interface DragInfo {
-  target: DragTarget;
-  startX: number;
-  startY: number;
-  startLeft: number;
-  startCol: number;
-  startRow: number;
+  target:     DragTarget;
+  startX:     number;
+  startY:     number;
+  startLeft:  number;
+  startRight: number;
+  startCol:   number;
+  startRow:   number;
 }
 
 function clamp(v: number, lo: number, hi: number) {
@@ -51,25 +52,29 @@ export default function App() {
   const triggerTicker    = useStore((s) => s.triggerTicker);
   const setTriggerTicker = useStore((s) => s.setTriggerTicker);
 
-  const [leftWidth,  setLeftWidth]  = useState(300);  // scanner width px
+  const [leftWidth,  setLeftWidth]  = useState(300);  // scanner panel px
+  const [watchWidth, setWatchWidth] = useState(260);  // watch panel px
   const [colSplit,   setColSplit]   = useState(38);   // % of chart area for LEFT column
   const [rowSplit,   setRowSplit]   = useState(55);   // % of chart area for TOP row
   const [inputVal,   setInputVal]   = useState("");
 
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const drag         = useRef<DragInfo | null>(null);
-  const stateRef     = useRef({ leftWidth, colSplit, rowSplit });
-  stateRef.current   = { leftWidth, colSplit, rowSplit };
+  const stateRef     = useRef({ leftWidth, watchWidth, colSplit, rowSplit });
+  stateRef.current   = { leftWidth, watchWidth, colSplit, rowSplit };
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!drag.current) return;
-      const { target, startX, startY, startLeft, startCol, startRow } = drag.current;
+      const { target, startX, startY, startLeft, startRight, startCol, startRow } = drag.current;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
 
       if (target === "left") {
         setLeftWidth(clamp(startLeft + dx, 160, 600));
+      } else if (target === "right") {
+        // Drag handle is on left edge of watch panel → moving left widens it
+        setWatchWidth(clamp(startRight - dx, 160, 520));
       } else if (target === "colSplit") {
         const chartW = (chartAreaRef.current?.clientWidth ?? 800);
         setColSplit(clamp(startCol + (dx / chartW) * 100, 15, 75));
@@ -91,9 +96,10 @@ export default function App() {
     e.preventDefault();
     drag.current = {
       target, startX: e.clientX, startY: e.clientY,
-      startLeft: stateRef.current.leftWidth,
-      startCol:  stateRef.current.colSplit,
-      startRow:  stateRef.current.rowSplit,
+      startLeft:  stateRef.current.leftWidth,
+      startRight: stateRef.current.watchWidth,
+      startCol:   stateRef.current.colSplit,
+      startRow:   stateRef.current.rowSplit,
     };
   }
 
@@ -107,9 +113,20 @@ export default function App() {
 
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-2 border-b border-[#21262d] bg-[#161b22] shrink-0">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           <span className="text-sm font-bold tracking-widest">NASDAQ SCANNER</span>
           <span className="text-[10px] text-[#8b949e] border border-[#30363d] rounded px-1.5 py-0.5">SMALL CAP</span>
+
+          {/* Vertical separator */}
+          <div className="w-px h-4 bg-[#30363d]" />
+
+          {/* Global universe config — sets WHICH tickers enter the system */}
+          <UniverseButton />
+
+          {/* Vertical separator */}
+          <div className="w-px h-4 bg-[#30363d]" />
+
+          {/* IBKR subscription counter */}
           <IBKRCounter />
         </div>
         <MarketStatus />
@@ -249,8 +266,14 @@ export default function App() {
           onMouseDown={(e) => startDrag(e, "colSplit")}
         />
 
+        {/* Drag: charts ↔ watch panel */}
+        <div
+          onMouseDown={(e) => startDrag(e, "right")}
+          className="w-[4px] shrink-0 bg-[#21262d] hover:bg-blue-600 cursor-col-resize transition-colors"
+        />
+
         {/* Watch panel */}
-        <div className="w-[260px] shrink-0 border-l border-[#21262d] overflow-hidden">
+        <div style={{ width: watchWidth }} className="shrink-0 overflow-hidden">
           <WatchPanel />
         </div>
       </div>
@@ -298,10 +321,9 @@ interface HealthData {
   scan_params:   { min_price: number; max_price: number; max_float: number; max_market_cap: number };
 }
 
-function IBKRCounter() {
-  const [health, setHealth]     = useState<HealthData | null>(null);
-  const [showModal, setShowModal] = useState(false);
-
+// Shared health state polled once, used by both UniverseButton and IBKRCounter
+function useHealth() {
+  const [health, setHealth] = useState<HealthData | null>(null);
   useEffect(() => {
     async function poll() {
       try {
@@ -314,38 +336,98 @@ function IBKRCounter() {
     const id = setInterval(poll, 5000);
     return () => clearInterval(id);
   }, []);
+  return { health, setHealth };
+}
 
+// Singleton health store so both components share one poll
+const _healthListeners: Array<(h: HealthData) => void> = [];
+let _healthInterval: ReturnType<typeof setInterval> | null = null;
+let _lastHealth: HealthData | null = null;
+
+function useSharedHealth(): [HealthData | null, (h: HealthData) => void] {
+  const [health, setHealthLocal] = useState<HealthData | null>(_lastHealth);
+
+  useEffect(() => {
+    _healthListeners.push(setHealthLocal);
+    if (!_healthInterval) {
+      async function poll() {
+        try {
+          const r = await fetch("/health");
+          const d = await r.json();
+          if (d.subscriptions) {
+            _lastHealth = d;
+            _healthListeners.forEach((fn) => fn(d));
+          }
+        } catch {}
+      }
+      poll();
+      _healthInterval = setInterval(poll, 5000);
+    }
+    return () => {
+      const i = _healthListeners.indexOf(setHealthLocal);
+      if (i >= 0) _healthListeners.splice(i, 1);
+    };
+  }, []);
+
+  function setHealth(h: HealthData) {
+    _lastHealth = h;
+    _healthListeners.forEach((fn) => fn(h));
+  }
+  return [health, setHealth];
+}
+
+// Universe button — opens global scanner universe config
+function UniverseButton() {
+  const [health, setHealth] = useSharedHealth();
+  const [showModal, setShowModal] = useState(false);
+
+  return (
+    <>
+      <button
+        onClick={() => setShowModal(true)}
+        className="flex items-center gap-1.5 text-[10px] text-[#8b949e] hover:text-white border border-[#30363d] hover:border-[#8b949e] rounded px-2 py-0.5 transition-colors"
+        title="Global universe: hvilke tickers scannerne kan finne"
+      >
+        <span>⚙</span>
+        <span className="font-semibold tracking-wider">UNIVERSE</span>
+        {health && (
+          <span className="text-[9px] text-[#444c56]">
+            ${health.scan_params.min_price}–${health.scan_params.max_price}
+            · float {(health.scan_params.max_float / 1_000_000).toFixed(0)}M
+          </span>
+        )}
+      </button>
+
+      {showModal && health && (
+        <ScannerUniverseModal
+          params={health.scan_params}
+          onClose={() => setShowModal(false)}
+          onSaved={(p) => setHealth({ ...health, scan_params: p })}
+        />
+      )}
+    </>
+  );
+}
+
+// IBKR subscription counter (read-only, just shows numbers)
+function IBKRCounter() {
+  const [health] = useSharedHealth();
   if (!health) return null;
+
   const { tier1, tier2, total, limit } = health.subscriptions;
   const pct = total / limit;
   const dotColor = pct > 0.95 ? "bg-red-500" : pct > 0.80 ? "bg-yellow-400" : "bg-[#26a69a]";
   const numColor = pct > 0.95 ? "text-red-400" : pct > 0.80 ? "text-yellow-400" : "text-[#8b949e]";
 
   return (
-    <>
-      <button
-        onClick={() => setShowModal(true)}
-        className="flex items-center gap-1.5 hover:bg-[#21262d] rounded px-2 py-0.5 transition-colors"
-        title="IBKR subscriptions · klikk for innstillinger"
-      >
-        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
-        <span className={`text-[10px] tabular-nums ${numColor}`}>
-          IBKR {total}/{limit}
-        </span>
-        <span className="text-[9px] text-[#30363d]">
-          T1:{tier1} T2:{tier2}
-        </span>
-        <span className="text-[10px] text-[#444c56]">⚙</span>
-      </button>
-
-      {showModal && (
-        <ScannerUniverseModal
-          params={health.scan_params}
-          onClose={() => setShowModal(false)}
-          onSaved={(p) => setHealth((h) => h ? { ...h, scan_params: p } : h)}
-        />
-      )}
-    </>
+    <div
+      className="flex items-center gap-1.5"
+      title={`IBKR subscriptions: ${tier1} Tier1 (reqRealTimeBars) + ${tier2} Tier2 (reqMktData) av ${limit} tillatte`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+      <span className={`text-[10px] tabular-nums font-medium ${numColor}`}>IBKR {total}/{limit}</span>
+      <span className="text-[9px] text-[#30363d]">T1:{tier1} T2:{tier2}</span>
+    </div>
   );
 }
 
