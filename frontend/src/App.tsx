@@ -321,65 +321,23 @@ interface HealthData {
   scan_params:   { min_price: number; max_price: number; max_float: number; max_market_cap: number };
 }
 
-// Shared health state polled once, used by both UniverseButton and IBKRCounter
-function useHealth() {
-  const [health, setHealth] = useState<HealthData | null>(null);
-  useEffect(() => {
-    async function poll() {
-      try {
-        const r = await fetch("/health");
-        const d = await r.json();
-        if (d.subscriptions) setHealth(d);
-      } catch {}
-    }
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => clearInterval(id);
-  }, []);
-  return { health, setHealth };
-}
-
-// Singleton health store so both components share one poll
-const _healthListeners: Array<(h: HealthData) => void> = [];
-let _healthInterval: ReturnType<typeof setInterval> | null = null;
-let _lastHealth: HealthData | null = null;
-
-function useSharedHealth(): [HealthData | null, (h: HealthData) => void] {
-  const [health, setHealthLocal] = useState<HealthData | null>(_lastHealth);
-
-  useEffect(() => {
-    _healthListeners.push(setHealthLocal);
-    if (!_healthInterval) {
-      async function poll() {
-        try {
-          const r = await fetch("/health");
-          const d = await r.json();
-          if (d.subscriptions) {
-            _lastHealth = d;
-            _healthListeners.forEach((fn) => fn(d));
-          }
-        } catch {}
-      }
-      poll();
-      _healthInterval = setInterval(poll, 5000);
-    }
-    return () => {
-      const i = _healthListeners.indexOf(setHealthLocal);
-      if (i >= 0) _healthListeners.splice(i, 1);
-    };
-  }, []);
-
-  function setHealth(h: HealthData) {
-    _lastHealth = h;
-    _healthListeners.forEach((fn) => fn(h));
-  }
-  return [health, setHealth];
-}
+const DEFAULT_SCAN_PARAMS: ScanParams = {
+  min_price: 1.0, max_price: 25.0,
+  max_float: 30_000_000, max_market_cap: 1_000_000_000,
+};
 
 // Universe button — opens global scanner universe config
 function UniverseButton() {
-  const [health, setHealth] = useSharedHealth();
+  const [params, setParams]     = useState<ScanParams>(DEFAULT_SCAN_PARAMS);
   const [showModal, setShowModal] = useState(false);
+  const [loaded, setLoaded]     = useState(false);
+
+  useEffect(() => {
+    fetch("/api/scanner/params")
+      .then((r) => r.json())
+      .then((d) => { setParams(d); setLoaded(true); })
+      .catch(() => setLoaded(true));
+  }, []);
 
   return (
     <>
@@ -390,39 +348,51 @@ function UniverseButton() {
       >
         <span>⚙</span>
         <span className="font-semibold tracking-wider">UNIVERSE</span>
-        {health && (
+        {loaded && (
           <span className="text-[9px] text-[#444c56]">
-            ${health.scan_params.min_price}–${health.scan_params.max_price}
-            · float {(health.scan_params.max_float / 1_000_000).toFixed(0)}M
+            ${params.min_price}–${params.max_price} · float {(params.max_float / 1_000_000).toFixed(0)}M
           </span>
         )}
       </button>
 
-      {showModal && health && (
+      {showModal && (
         <ScannerUniverseModal
-          params={health.scan_params}
+          params={params}
           onClose={() => setShowModal(false)}
-          onSaved={(p) => setHealth({ ...health, scan_params: p })}
+          onSaved={(p) => { setParams(p); setShowModal(false); }}
         />
       )}
     </>
   );
 }
 
-// IBKR subscription counter (read-only, just shows numbers)
+// IBKR subscription counter (read-only, polls /health every 5s)
 function IBKRCounter() {
-  const [health] = useSharedHealth();
-  if (!health) return null;
+  const [subs, setSubs] = useState<{ tier1: number; tier2: number; total: number; limit: number } | null>(null);
 
-  const { tier1, tier2, total, limit } = health.subscriptions;
-  const pct = total / limit;
-  const dotColor = pct > 0.95 ? "bg-red-500" : pct > 0.80 ? "bg-yellow-400" : "bg-[#26a69a]";
-  const numColor = pct > 0.95 ? "text-red-400" : pct > 0.80 ? "text-yellow-400" : "text-[#8b949e]";
+  useEffect(() => {
+    async function poll() {
+      try {
+        const r = await fetch("/health");
+        const d = await r.json();
+        if (d.subscriptions) setSubs(d.subscriptions);
+      } catch {}
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!subs) return null;
+  const { tier1, tier2, total, limit } = subs;
+  const pct      = total / limit;
+  const dotColor = pct > 0.95 ? "bg-red-500"    : pct > 0.80 ? "bg-yellow-400" : "bg-[#26a69a]";
+  const numColor = pct > 0.95 ? "text-red-400"  : pct > 0.80 ? "text-yellow-400" : "text-[#8b949e]";
 
   return (
     <div
       className="flex items-center gap-1.5"
-      title={`IBKR subscriptions: ${tier1} Tier1 (reqRealTimeBars) + ${tier2} Tier2 (reqMktData) av ${limit} tillatte`}
+      title={`T1: ${tier1} reqRealTimeBars · T2: ${tier2} reqMktData · limit ~${limit}`}
     >
       <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
       <span className={`text-[10px] tabular-nums font-medium ${numColor}`}>IBKR {total}/{limit}</span>
@@ -439,10 +409,11 @@ interface ScanParams {
 function ScannerUniverseModal({ params, onClose, onSaved }: {
   params: ScanParams;
   onClose: () => void;
-  onSaved: (p: ScanParams) => void;
+  onSaved: (p: ScanParams) => void;  // called with saved params; parent handles close
 }) {
-  const [p, setP] = useState<ScanParams>({ ...params });
+  const [p, setP]     = useState<ScanParams>({ ...params });
   const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState("");
 
   function set<K extends keyof ScanParams>(k: K, v: number) {
     setP((prev) => ({ ...prev, [k]: v }));
@@ -450,17 +421,20 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
 
   async function save() {
     setSaving(true);
+    setError("");
     try {
       const r = await fetch("/api/scanner/params", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(p),
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const updated = await r.json();
       onSaved(updated);
-      onClose();
-    } catch {}
-    setSaving(false);
+    } catch (e: any) {
+      setError("Feil ved lagring — er backend oppe?");
+      setSaving(false);
+    }
   }
 
   return (
@@ -494,7 +468,8 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
           </div>
         ))}
 
-        <div className="flex justify-end gap-2 mt-5">
+        {error && <p className="text-[10px] text-red-400 mt-2">{error}</p>}
+        <div className="flex justify-end gap-2 mt-4">
           <button onClick={onClose} className="text-xs text-[#8b949e] hover:text-white border border-[#30363d] rounded px-3 py-1.5">Avbryt</button>
           <button onClick={save} disabled={saving} className="text-xs bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white rounded px-4 py-1.5">
             {saving ? "Lagrer..." : "Lagre"}
