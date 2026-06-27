@@ -1,0 +1,32 @@
+# Env files (use .env.example instead)
+.env
+.env.local
+.env.*.local
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/.env
+*.egg-info/
+dist/
+build/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
