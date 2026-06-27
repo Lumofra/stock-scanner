@@ -110,6 +110,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <span className="text-sm font-bold tracking-widest">NASDAQ SCANNER</span>
           <span className="text-[10px] text-[#8b949e] border border-[#30363d] rounded px-1.5 py-0.5">SMALL CAP</span>
+          <IBKRCounter />
         </div>
         <MarketStatus />
       </header>
@@ -287,6 +288,141 @@ function ColSplitOverlay({ leftWidth, colPct, chartAreaRef, onMouseDown }: {
     />
   );
 }
+
+// ---------------------------------------------------------------------------
+// IBKR subscription counter + scanner universe settings
+// ---------------------------------------------------------------------------
+
+interface HealthData {
+  subscriptions: { tier1: number; tier2: number; total: number; limit: number };
+  scan_params:   { min_price: number; max_price: number; max_float: number; max_market_cap: number };
+}
+
+function IBKRCounter() {
+  const [health, setHealth]     = useState<HealthData | null>(null);
+  const [showModal, setShowModal] = useState(false);
+
+  useEffect(() => {
+    async function poll() {
+      try {
+        const r = await fetch("/health");
+        const d = await r.json();
+        if (d.subscriptions) setHealth(d);
+      } catch {}
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!health) return null;
+  const { tier1, tier2, total, limit } = health.subscriptions;
+  const pct = total / limit;
+  const dotColor = pct > 0.95 ? "bg-red-500" : pct > 0.80 ? "bg-yellow-400" : "bg-[#26a69a]";
+  const numColor = pct > 0.95 ? "text-red-400" : pct > 0.80 ? "text-yellow-400" : "text-[#8b949e]";
+
+  return (
+    <>
+      <button
+        onClick={() => setShowModal(true)}
+        className="flex items-center gap-1.5 hover:bg-[#21262d] rounded px-2 py-0.5 transition-colors"
+        title="IBKR subscriptions · klikk for innstillinger"
+      >
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+        <span className={`text-[10px] tabular-nums ${numColor}`}>
+          IBKR {total}/{limit}
+        </span>
+        <span className="text-[9px] text-[#30363d]">
+          T1:{tier1} T2:{tier2}
+        </span>
+        <span className="text-[10px] text-[#444c56]">⚙</span>
+      </button>
+
+      {showModal && (
+        <ScannerUniverseModal
+          params={health.scan_params}
+          onClose={() => setShowModal(false)}
+          onSaved={(p) => setHealth((h) => h ? { ...h, scan_params: p } : h)}
+        />
+      )}
+    </>
+  );
+}
+
+interface ScanParams {
+  min_price: number; max_price: number;
+  max_float: number; max_market_cap: number;
+}
+
+function ScannerUniverseModal({ params, onClose, onSaved }: {
+  params: ScanParams;
+  onClose: () => void;
+  onSaved: (p: ScanParams) => void;
+}) {
+  const [p, setP] = useState<ScanParams>({ ...params });
+  const [saving, setSaving] = useState(false);
+
+  function set<K extends keyof ScanParams>(k: K, v: number) {
+    setP((prev) => ({ ...prev, [k]: v }));
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const r = await fetch("/api/scanner/params", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(p),
+      });
+      const updated = await r.json();
+      onSaved(updated);
+      onClose();
+    } catch {}
+    setSaving(false);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-80 p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-white">Scanner universe</h2>
+          <button onClick={onClose} className="text-[#8b949e] hover:text-white text-lg leading-none">×</button>
+        </div>
+        <p className="text-[9px] text-[#444c56] mb-4">
+          Disse filtrene avgjør hvilke tickers IBKR-scanneren i det hele tatt plukker opp.
+          Endringer trer i kraft neste scanner-runde (~60 sek). Ingen restart nødvendig.
+        </p>
+
+        {([
+          { key: "min_price",      label: "Min pris ($)",          step: 0.5,       hint: "Anbefalt: 1.00" },
+          { key: "max_price",      label: "Max pris ($)",          step: 1,         hint: "" },
+          { key: "max_float",      label: "Max float (aksjer)",    step: 1_000_000, hint: "30M = small cap" },
+          { key: "max_market_cap", label: "Max market cap ($)",    step: 100_000_000, hint: "1B = standard" },
+        ] as { key: keyof ScanParams; label: string; step: number; hint: string }[]).map(({ key, label, step, hint }) => (
+          <div key={key} className="mb-3">
+            <label className="text-[10px] text-[#8b949e] uppercase tracking-wider block mb-1">{label}</label>
+            {hint && <span className="text-[9px] text-[#444c56] block mb-1">{hint}</span>}
+            <input
+              type="number"
+              step={step}
+              value={p[key]}
+              onChange={(e) => set(key, parseFloat(e.target.value) || 0)}
+              className="bg-[#0d1117] border border-[#30363d] text-white rounded px-2 py-1 text-xs w-full focus:outline-none focus:border-blue-600"
+            />
+          </div>
+        ))}
+
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="text-xs text-[#8b949e] hover:text-white border border-[#30363d] rounded px-3 py-1.5">Avbryt</button>
+          <button onClick={save} disabled={saving} className="text-xs bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white rounded px-4 py-1.5">
+            {saving ? "Lagrer..." : "Lagre"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function getETInfo(date: Date) {
   const parts = new Intl.DateTimeFormat("en-US", {

@@ -39,6 +39,32 @@ log = logging.getLogger(__name__)
 
 ET = timezone(timedelta(hours=-4))
 
+# ---------------------------------------------------------------------------
+# Runtime-adjustable scanner universe parameters
+# (can be updated via POST /api/scanner/params without restarting)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, asdict
+
+@dataclass
+class ScannerParams:
+    min_price:      float = MIN_PRICE          # default from config (1.00)
+    max_price:      float = MAX_PRICE          # default from config (25.0)
+    max_float:      int   = MAX_FLOAT          # default from config (30M)
+    max_market_cap: int   = 1_000_000_000      # $1B IBKR coarse filter
+
+_scan_params = ScannerParams()
+
+def get_scan_params() -> ScannerParams:
+    return _scan_params
+
+def update_scan_params(**kwargs):
+    for k, v in kwargs.items():
+        if hasattr(_scan_params, k) and v is not None:
+            setattr(_scan_params, k, type(getattr(_scan_params, k))(v))
+    log.info(f"Scanner params updated: {asdict(_scan_params)}")
+
+
 _bar_complete_callbacks: list = []
 
 # Tier 1: reqRealTimeBars — all scanner tickers (5-second bars)
@@ -64,6 +90,14 @@ def register_bar_callback(fn):
 
 def get_tier2_tickers() -> list[str]:
     return list(_tier2_subs.keys())
+
+def get_subscription_counts() -> dict:
+    return {
+        "tier1": len(_active_subs),
+        "tier2": len(_tier2_subs),
+        "total": len(_active_subs) + len(_tier2_subs),
+        "limit": 100,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -317,16 +351,17 @@ async def _run_scanner(ib: IB):
             is_rth = 330 <= et_min < 720   # 09:30–16:00 relative to 4 AM offset
             vol_threshold = 50_000 if is_rth else 2_000
 
+            p = get_scan_params()
             for scan_code in _SCAN_CODES:
                 sub = ScannerSubscription(
                     instrument="STK",
-                    locationCode="STK.NASDAQ",   # all NASDAQ listings
+                    locationCode="STK.NASDAQ",
                     scanCode=scan_code,
                     numberOfRows=50,
-                    abovePrice=MIN_PRICE,
-                    belowPrice=MAX_PRICE,
+                    abovePrice=p.min_price,
+                    belowPrice=p.max_price,
                     aboveVolume=vol_threshold,
-                    marketCapBelow=1_000_000_000,  # < $1B as coarse float proxy
+                    marketCapBelow=p.max_market_cap,
                 )
                 try:
                     scan_data = await ib.reqScannerDataAsync(sub)

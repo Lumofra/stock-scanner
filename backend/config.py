@@ -23,7 +23,7 @@ REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
 # ---------------------------------------------------------------------------
 MAX_FLOAT: int = 30_000_000
 MAX_PRICE: float = 25.0
-MIN_PRICE: float = 0.10
+MIN_PRICE: float = 1.00
 
 # How often the IBKR server-side scanner refreshes (seconds)
 SCANNER_REFRESH_SECONDS: int = 60

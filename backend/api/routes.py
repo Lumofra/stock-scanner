@@ -106,6 +106,31 @@ def get_tier2():
 
 
 # ---------------------------------------------------------------------------
+# Scanner universe parameters (runtime-adjustable, no restart needed)
+# ---------------------------------------------------------------------------
+
+class ScannerParamsModel(BaseModel):
+    min_price:      Optional[float] = None
+    max_price:      Optional[float] = None
+    max_float:      Optional[int]   = None
+    max_market_cap: Optional[int]   = None
+
+@router.get("/scanner/params")
+def get_scanner_params():
+    from scanner.data_feed import get_scan_params
+    from dataclasses import asdict
+    return asdict(get_scan_params())
+
+@router.post("/scanner/params")
+def update_scanner_params(body: ScannerParamsModel):
+    from scanner.data_feed import update_scan_params
+    update_scan_params(**body.model_dump())
+    from scanner.data_feed import get_scan_params
+    from dataclasses import asdict
+    return asdict(get_scan_params())
+
+
+# ---------------------------------------------------------------------------
 # Market calendar (today's session open/close, handles early closes)
 # ---------------------------------------------------------------------------
 

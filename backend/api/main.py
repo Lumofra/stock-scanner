@@ -87,10 +87,13 @@ async def ws_events(websocket: WebSocket):
 @app.get("/health")
 def health():
     active = sum(1 for s in STOCKS.values() if s.price > 0)
-    from scanner.data_feed import _active_subs
+    from scanner.data_feed import get_subscription_counts, get_scan_params
+    from dataclasses import asdict
+    subs = get_subscription_counts()
     return {
         "status": "ok",
         "tracked_tickers": len(STOCKS),
         "active_tickers": active,
-        "realtime_subscriptions": len(_active_subs),
+        "subscriptions": subs,
+        "scan_params": asdict(get_scan_params()),
     }
