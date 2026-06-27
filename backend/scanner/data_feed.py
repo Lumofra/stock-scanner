@@ -310,6 +310,13 @@ async def _run_scanner(ib: IB):
         try:
             found: set[str] = set()
 
+            # Volume threshold depends on session:
+            # RTH (9:30–16:00 ET): 50k — filters noise, keeps real movers
+            # Extended hours: 2k — pre/post market has much lower volume
+            et_min = _et_minute_of_day(int(time.time()))
+            is_rth = 330 <= et_min < 720   # 09:30–16:00 relative to 4 AM offset
+            vol_threshold = 50_000 if is_rth else 2_000
+
             for scan_code in _SCAN_CODES:
                 sub = ScannerSubscription(
                     instrument="STK",
@@ -318,7 +325,7 @@ async def _run_scanner(ib: IB):
                     numberOfRows=50,
                     abovePrice=MIN_PRICE,
                     belowPrice=MAX_PRICE,
-                    aboveVolume=50_000,
+                    aboveVolume=vol_threshold,
                     marketCapBelow=1_000_000_000,  # < $1B as coarse float proxy
                 )
                 try:
