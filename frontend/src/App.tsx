@@ -483,8 +483,10 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
           )}
         </div>
         <p className="text-[9px] text-[#444c56] mb-4 leading-relaxed">
-          Disse filtrene avgjør hvilke tickers IBKR-scanneren plukker opp.
-          IBKR returnerer maks 50 per søk × 3 søk = <span className="text-[#8b949e]">maks ~150 tickers</span> — alltid de mest aktive nå.
+          <span className="text-[#8b949e]">Min pris</span> brukes som display-filter i scannerene.
+          Discovery-terskelen er automatisk satt til <span className="text-[#8b949e]">50% lavere</span> slik at
+          tickers som nærmer seg grensen allerede overvåkes — og vises umiddelbart når de krysser.
+          IBKR returnerer maks 50 per søk × 3 søk = maks ~150 tickers.
           Endringer trer i kraft neste scanner-runde (~60 sek).
         </p>
 
