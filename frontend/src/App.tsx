@@ -409,11 +409,24 @@ interface ScanParams {
 function ScannerUniverseModal({ params, onClose, onSaved }: {
   params: ScanParams;
   onClose: () => void;
-  onSaved: (p: ScanParams) => void;  // called with saved params; parent handles close
+  onSaved: (p: ScanParams) => void;
 }) {
-  const [p, setP]     = useState<ScanParams>({ ...params });
+  const [p, setP]       = useState<ScanParams>({ ...params });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
+  const [stats, setStats]   = useState<{ tracked: number; active: number; t1: number; t2: number } | null>(null);
+
+  useEffect(() => {
+    fetch("/health")
+      .then((r) => r.json())
+      .then((d) => setStats({
+        tracked: d.tracked_tickers ?? 0,
+        active:  d.active_tickers  ?? 0,
+        t1:      d.subscriptions?.tier1 ?? 0,
+        t2:      d.subscriptions?.tier2 ?? 0,
+      }))
+      .catch(() => {});
+  }, []);
 
   function set<K extends keyof ScanParams>(k: K, v: number) {
     setP((prev) => ({ ...prev, [k]: v }));
@@ -444,9 +457,35 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
           <h2 className="text-sm font-semibold text-white">Scanner universe</h2>
           <button onClick={onClose} className="text-[#8b949e] hover:text-white text-lg leading-none">×</button>
         </div>
-        <p className="text-[9px] text-[#444c56] mb-4">
-          Disse filtrene avgjør hvilke tickers IBKR-scanneren i det hele tatt plukker opp.
-          Endringer trer i kraft neste scanner-runde (~60 sek). Ingen restart nødvendig.
+        {/* Live stats */}
+        <div className="flex gap-3 mb-4 p-2 bg-[#0d1117] rounded border border-[#21262d]">
+          {stats ? (
+            <>
+              <div className="flex flex-col items-center flex-1">
+                <span className="text-base font-bold text-white tabular-nums">{stats.tracked}</span>
+                <span className="text-[9px] text-[#444c56]">oppdaget</span>
+              </div>
+              <div className="flex flex-col items-center flex-1">
+                <span className="text-base font-bold text-[#26a69a] tabular-nums">{stats.active}</span>
+                <span className="text-[9px] text-[#444c56]">aktive</span>
+              </div>
+              <div className="flex flex-col items-center flex-1">
+                <span className="text-base font-bold text-blue-400 tabular-nums">{stats.t1}</span>
+                <span className="text-[9px] text-[#444c56]">T1 subs</span>
+              </div>
+              <div className="flex flex-col items-center flex-1">
+                <span className="text-base font-bold text-purple-400 tabular-nums">{stats.t2}</span>
+                <span className="text-[9px] text-[#444c56]">T2 subs</span>
+              </div>
+            </>
+          ) : (
+            <span className="text-[9px] text-[#444c56] w-full text-center">Backend ikke tilkoblet</span>
+          )}
+        </div>
+        <p className="text-[9px] text-[#444c56] mb-4 leading-relaxed">
+          Disse filtrene avgjør hvilke tickers IBKR-scanneren plukker opp.
+          IBKR returnerer maks 50 per søk × 3 søk = <span className="text-[#8b949e]">maks ~150 tickers</span> — alltid de mest aktive nå.
+          Endringer trer i kraft neste scanner-runde (~60 sek).
         </p>
 
         {([
