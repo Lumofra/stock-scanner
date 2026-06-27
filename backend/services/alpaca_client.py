@@ -12,7 +12,9 @@ Float note: Alpaca has no float endpoint. yfinance pulls it from Yahoo Finance.
 It's cached in Redis so each ticker is only fetched once per day.
 """
 import asyncio
+import json
 import logging
+import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from statistics import mean
@@ -226,6 +228,79 @@ async def load_todays_volume(ticker: str):
             STOCKS[ticker].volume_today = sum(int(b.volume) for b in bars)
     except Exception as e:
         log.debug(f"today volume seed failed for {ticker}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Market calendar  (Alpaca Trading API — session open/close per day)
+# ---------------------------------------------------------------------------
+
+async def get_market_calendar() -> dict:
+    """
+    Return today's trading session info from Alpaca's calendar API.
+    Handles early closes (Black Friday, Christmas Eve, etc.).
+    Result is cached in Redis until midnight.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+
+    redis = get_redis()
+    cached = await redis.get(f"mktcal:{today}")
+    if cached:
+        return json.loads(cached)
+
+    def _fetch():
+        try:
+            resp = requests.get(
+                "https://paper-api.alpaca.markets/v2/calendar",
+                params={"start": today, "end": today},
+                headers={
+                    "APCA-API-KEY-ID":     ALPACA_API_KEY,
+                    "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    d = data[0]
+                    return {
+                        "date":            today,
+                        "is_trading_day":  True,
+                        "open":            d.get("open",  "09:30"),
+                        "close":           d.get("close", "16:00"),
+                        "source":          "alpaca",
+                    }
+                # Empty list = non-trading day (holiday or weekend)
+                return {
+                    "date":           today,
+                    "is_trading_day": False,
+                    "open":           None,
+                    "close":          None,
+                    "source":         "alpaca",
+                }
+        except Exception as e:
+            log.warning(f"Alpaca calendar fetch failed: {e}")
+        return None
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _fetch)
+
+    if result is None:
+        # Fallback: assume standard hours on weekdays
+        is_weekend = datetime.now(ET).weekday() >= 5
+        result = {
+            "date":           today,
+            "is_trading_day": not is_weekend,
+            "open":           None if is_weekend else "09:30",
+            "close":          None if is_weekend else "16:00",
+            "source":         "fallback",
+        }
+
+    # Cache until midnight ET (but at least 1 hour to avoid hammering the API)
+    now_et   = datetime.now(ET)
+    midnight = now_et.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    ttl      = max(3600, int((midnight - now_et).total_seconds()))
+    await redis.setex(f"mktcal:{today}", ttl, json.dumps(result))
+    return result
 
 
 # ---------------------------------------------------------------------------

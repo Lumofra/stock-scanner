@@ -106,6 +106,17 @@ def get_tier2():
 
 
 # ---------------------------------------------------------------------------
+# Market calendar (today's session open/close, handles early closes)
+# ---------------------------------------------------------------------------
+
+@router.get("/market/today")
+async def market_today():
+    """Return today's trading session: is_trading_day, open (HH:MM), close (HH:MM)."""
+    from services.alpaca_client import get_market_calendar
+    return await get_market_calendar()
+
+
+# ---------------------------------------------------------------------------
 # Server / IBKR time
 # ---------------------------------------------------------------------------
 

@@ -288,11 +288,94 @@ function ColSplitOverlay({ leftWidth, colPct, chartAreaRef, onMouseDown }: {
   );
 }
 
-function MarketStatus() {
-  const [now, setNow]         = useState(() => new Date());
-  const [driftMs, setDriftMs] = useState<number | null>(null);
+function getETInfo(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric", minute: "numeric", second: "numeric",
+    weekday: "short",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type: string) => parseInt(parts.find((p) => p.type === type)?.value ?? "0");
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const h = get("hour");
+  const m = get("minute");
+  const s = get("second");
+  return {
+    minutes: h * 60 + m,
+    isWeekend: weekday === "Sat" || weekday === "Sun",
+    timeStr: `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`,
+  };
+}
 
-  // Tick every second
+// Market sessions in ET minutes from midnight
+// PRE-MARKET:  04:00–09:30  (240–570)
+// OPENING:     09:30–09:45  (570–585)  — first 15 min, highest volatility
+// MARKET OPEN: 09:45–15:00  (585–900)
+// POWER HOUR:  15:00–16:00  (900–960)  — last hour, volume surge
+// AFTER-HOURS: 16:00–20:00  (960–1200)
+// CLOSED:      everything else + weekends
+
+type MarketPhase = {
+  label: string;
+  color: string;
+  dot: string;
+  pulse: boolean;
+};
+
+function resolvePhase(minutes: number, isClosed: boolean, closeMins = 960): MarketPhase {
+  const powerHourStart = closeMins - 60;
+  const openMins = 570; // 09:30 always
+  if (isClosed || minutes < 240 || minutes >= 1200)
+    return { label: "MARKET CLOSED", color: "text-[#8b949e]",    dot: "bg-[#444c56]",    pulse: false };
+  if (minutes < openMins)
+    return { label: "PRE-MARKET",    color: "text-yellow-400",   dot: "bg-yellow-400",   pulse: false };
+  if (minutes < openMins + 15)
+    return { label: "OPENING",       color: "text-emerald-300",  dot: "bg-emerald-300",  pulse: true  };
+  if (minutes < powerHourStart)
+    return { label: "MARKET OPEN",   color: "text-[#26a69a]",    dot: "bg-[#26a69a]",    pulse: true  };
+  if (minutes < closeMins)
+    return { label: "POWER HOUR",    color: "text-orange-300",   dot: "bg-orange-300",   pulse: true  };
+  return   { label: "AFTER-HOURS",   color: "text-orange-400",   dot: "bg-orange-400",   pulse: false };
+}
+
+interface MarketCalendar {
+  is_trading_day: boolean;
+  open:  string | null;   // "09:30"
+  close: string | null;   // "13:00" on early-close days
+  source: string;
+}
+
+function parseHHMM(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function fmtCountdown(diffMin: number): string {
+  const h = Math.floor(diffMin / 60);
+  const m = diffMin % 60;
+  if (h > 0) return `${h}t ${m}m`;
+  return `${m}m`;
+}
+
+function nextOpenLabel(now: Date): string {
+  // Returns e.g. "åpner man 09:30" based on current ET weekday
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", weekday: "short", hour12: false,
+  }).formatToParts(now);
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const dayMap: Record<string, number> = { Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6, Sun:0 };
+  const nbMap:  Record<string, string> = { Mon:"man", Tue:"tir", Wed:"ons", Thu:"tor", Fri:"fre", Sat:"man", Sun:"man" };
+  const daysUntilMon: Record<string, string> = { Fri:"man", Sat:"man", Sun:"man" };
+  if (weekday === "Fri" || weekday === "Sat" || weekday === "Sun")
+    return `åpner man 09:30`;
+  return `åpner i morgen 09:30`;
+}
+
+function MarketStatus() {
+  const [now, setNow]           = useState(() => new Date());
+  const [driftMs, setDriftMs]   = useState<number | null>(null);
+  const [calendar, setCalendar] = useState<MarketCalendar | null>(null);
+
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -312,40 +395,93 @@ function MarketStatus() {
     return () => clearInterval(id);
   }, []);
 
-  const etStr = now.toLocaleTimeString("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false,
-  });
+  // Fetch market calendar once per day
+  useEffect(() => {
+    async function fetchCal() {
+      try {
+        const res  = await fetch("/api/market/today");
+        const data = await res.json();
+        setCalendar(data);
+      } catch { /* ignore */ }
+    }
+    fetchCal();
+    // Re-fetch at midnight ET each day
+    const now_et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const msToMidnight = (
+      new Date(now_et.getFullYear(), now_et.getMonth(), now_et.getDate() + 1).getTime() - now_et.getTime()
+    );
+    const t = setTimeout(fetchCal, msToMidnight);
+    return () => clearTimeout(t);
+  }, []);
 
-  const [hStr, mStr] = etStr.split(":");
-  const minutes = parseInt(hStr) * 60 + parseInt(mStr);
+  const { minutes, isWeekend, timeStr } = getETInfo(now);
 
-  const [status, color] =
-    minutes >= 240 && minutes < 570  ? ["PRE-MARKET",    "text-yellow-400"] :
-    minutes >= 570 && minutes < 960  ? ["MARKET OPEN",   "text-[#26a69a]"]  :
-    minutes >= 960 && minutes < 1200 ? ["AFTER-HOURS",   "text-orange-400"] :
-                                       ["MARKET CLOSED", "text-[#8b949e]"];
+  // Resolve phase using calendar for accurate close time
+  const closeMins = calendar?.close ? parseHHMM(calendar.close) : 960;
+  const openMins  = calendar?.open  ? parseHHMM(calendar.open)  : 570;
+  const isTradingDay = calendar ? calendar.is_trading_day : !isWeekend;
 
-  const driftOk  = driftMs !== null && Math.abs(driftMs) < 5000;
+  const phase = resolvePhase(
+    minutes,
+    isWeekend || !isTradingDay,
+    closeMins,  // pass actual close so POWER HOUR uses real close time
+  );
+
+  // Countdown text
+  let countdown: string | null = null;
+  if (isTradingDay && !isWeekend) {
+    if (phase.label === "PRE-MARKET") {
+      countdown = `åpner om ${fmtCountdown(openMins - minutes)}`;
+    } else if (["OPENING", "MARKET OPEN", "POWER HOUR"].includes(phase.label)) {
+      const diff = closeMins - minutes;
+      countdown = `stenger om ${fmtCountdown(diff)}`;
+      // Warn when ≤ 15 min to close
+      if (diff <= 15) countdown = `⚠ ${countdown}`;
+    } else if (phase.label === "AFTER-HOURS") {
+      countdown = nextOpenLabel(now);
+    }
+  } else {
+    countdown = nextOpenLabel(now);
+  }
+
   const driftWarn = driftMs !== null && Math.abs(driftMs) >= 5000;
+
+  // Early-close badge — show if market closes before 15:30
+  const earlyClose = isTradingDay && calendar?.close && closeMins < 15 * 60 + 30;
 
   return (
     <div className="flex items-center gap-3">
       {driftMs !== null && (
         <span
           className={`text-[9px] border rounded px-1.5 py-0.5 ${
-            driftWarn
-              ? "text-red-400 border-red-800"
-              : "text-[#444c56] border-[#30363d]"
+            driftWarn ? "text-red-400 border-red-800" : "text-[#444c56] border-[#30363d]"
           }`}
           title={`Systemklokke vs IBKR: ${driftMs > 0 ? "+" : ""}${driftMs}ms`}
         >
           {driftWarn ? `⚠ drift ${Math.round(driftMs / 1000)}s` : `IBKR ±${Math.abs(driftMs)}ms`}
         </span>
       )}
-      <span className={`text-xs font-semibold ${color}`}>{status}</span>
-      <span className="text-[10px] text-[#8b949e] tabular-nums">{etStr} ET</span>
+
+      {earlyClose && (
+        <span className="text-[9px] text-yellow-500 border border-yellow-800 rounded px-1.5 py-0.5">
+          kortere dag · stenger {calendar!.close}
+        </span>
+      )}
+
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${phase.dot} ${phase.pulse ? "animate-pulse" : ""}`} />
+        <span className={`text-xs font-semibold ${phase.color}`}>{phase.label}</span>
+      </div>
+
+      {countdown && (
+        <span className={`text-[10px] tabular-nums ${
+          countdown.startsWith("⚠") ? "text-red-400 font-semibold" : "text-[#8b949e]"
+        }`}>
+          {countdown}
+        </span>
+      )}
+
+      <span className="text-[10px] text-[#444c56] tabular-nums">{timeStr} ET</span>
     </div>
   );
 }
