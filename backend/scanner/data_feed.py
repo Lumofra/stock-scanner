@@ -352,18 +352,13 @@ async def _run_scanner(ib: IB):
             vol_threshold = 50_000 if is_rth else 2_000
 
             p = get_scan_params()
-            # Discovery threshold is lower than display min_price so tickers
-            # approaching the threshold are already subscribed when they cross it.
-            # E.g. display filter $1.00 → discover from $0.50 so a $0.90→$2 move
-            # is caught the moment it crosses $1, not 60 seconds later.
-            discovery_min = max(0.10, p.min_price * 0.5)
             for scan_code in _SCAN_CODES:
                 sub = ScannerSubscription(
                     instrument="STK",
                     locationCode="STK.NASDAQ",
                     scanCode=scan_code,
                     numberOfRows=50,
-                    abovePrice=discovery_min,
+                    abovePrice=p.min_price,
                     belowPrice=p.max_price,
                     aboveVolume=vol_threshold,
                     marketCapBelow=p.max_market_cap,

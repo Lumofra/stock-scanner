@@ -366,9 +366,11 @@ function UniverseButton() {
   );
 }
 
-// IBKR subscription counter (read-only, polls /health every 5s)
+// IBKR capacity bar — shows subscription utilisation as a progress bar
 function IBKRCounter() {
-  const [subs, setSubs] = useState<{ tier1: number; tier2: number; total: number; limit: number } | null>(null);
+  const [subs, setSubs] = useState<{
+    tier1: number; tier2: number; total: number; limit: number;
+  } | null>(null);
 
   useEffect(() => {
     async function poll() {
@@ -383,20 +385,61 @@ function IBKRCounter() {
     return () => clearInterval(id);
   }, []);
 
-  if (!subs) return null;
+  if (!subs) return (
+    <div className="flex items-center gap-1.5 opacity-30">
+      <div className="w-20 h-1.5 bg-[#21262d] rounded-full" />
+      <span className="text-[9px] text-[#444c56]">–/100</span>
+    </div>
+  );
+
   const { tier1, tier2, total, limit } = subs;
-  const pct      = total / limit;
-  const dotColor = pct > 0.95 ? "bg-red-500"    : pct > 0.80 ? "bg-yellow-400" : "bg-[#26a69a]";
-  const numColor = pct > 0.95 ? "text-red-400"  : pct > 0.80 ? "text-yellow-400" : "text-[#8b949e]";
+  const pct = Math.min(total / limit, 1);
+  const pctT1 = Math.min(tier1 / limit, 1);
+
+  const barColor =
+    pct > 0.90 ? "bg-red-500" :
+    pct > 0.75 ? "bg-yellow-400" :
+    "bg-[#26a69a]";
+
+  const label =
+    pct > 0.90 ? "text-red-400" :
+    pct > 0.75 ? "text-yellow-300" :
+    "text-[#8b949e]";
 
   return (
     <div
-      className="flex items-center gap-1.5"
-      title={`T1: ${tier1} reqRealTimeBars · T2: ${tier2} reqMktData · limit ~${limit}`}
+      className="flex items-center gap-2"
+      title={`T1 (reqRealTimeBars): ${tier1} · T2 (reqMktData): ${tier2} · Limit: ~${limit}`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
-      <span className={`text-[10px] tabular-nums font-medium ${numColor}`}>IBKR {total}/{limit}</span>
-      <span className="text-[9px] text-[#30363d]">T1:{tier1} T2:{tier2}</span>
+      {/* Bar */}
+      <div className="flex flex-col gap-0.5">
+        <div className="w-20 h-1.5 bg-[#21262d] rounded-full overflow-hidden relative">
+          {/* T1 fill */}
+          <div
+            className="absolute left-0 top-0 h-full bg-[#26a69a]/60 rounded-full transition-all duration-1000"
+            style={{ width: `${pctT1 * 100}%` }}
+          />
+          {/* T2 fill on top of T1 */}
+          <div
+            className={`absolute left-0 top-0 h-full ${barColor} rounded-full transition-all duration-1000`}
+            style={{ width: `${pct * 100}%` }}
+          />
+        </div>
+        <div className="flex justify-between">
+          <span className="text-[8px] text-[#30363d]">T1:{tier1} T2:{tier2}</span>
+          <span className={`text-[8px] tabular-nums ${label}`}>
+            {Math.round(pct * 100)}%
+          </span>
+        </div>
+      </div>
+
+      {/* Count */}
+      <div className="flex flex-col items-end">
+        <span className={`text-[10px] font-semibold tabular-nums leading-none ${label}`}>
+          {total}
+        </span>
+        <span className="text-[8px] text-[#444c56] leading-none">/{limit}</span>
+      </div>
     </div>
   );
 }
@@ -483,11 +526,9 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
           )}
         </div>
         <p className="text-[9px] text-[#444c56] mb-4 leading-relaxed">
-          <span className="text-[#8b949e]">Min pris</span> brukes som display-filter i scannerene.
-          Discovery-terskelen er automatisk satt til <span className="text-[#8b949e]">50% lavere</span> slik at
-          tickers som nærmer seg grensen allerede overvåkes — og vises umiddelbart når de krysser.
-          IBKR returnerer maks 50 per søk × 3 søk = maks ~150 tickers.
-          Endringer trer i kraft neste scanner-runde (~60 sek).
+          IBKR-scanneren returnerer maks 50 tickers per søk × 3 søk = <span className="text-[#8b949e]">maks ~150 unike tickers</span> — alltid de mest aktive akkurat nå.
+          Nye tickers oppdages innen ~60 sek (scanner-refresh).
+          Endringer trer i kraft ved neste scanner-runde.
         </p>
 
         {([
