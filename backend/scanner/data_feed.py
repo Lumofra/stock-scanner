@@ -366,7 +366,7 @@ async def _lazy_loader(ib: IB):
         get_float_shares,
         load_prev_close,
         load_avg_intraday_volumes_for,
-        load_todays_volume,
+        seed_todays_bars,
     )
 
     while True:
@@ -382,11 +382,11 @@ async def _lazy_loader(ib: IB):
             asyncio.create_task(
                 _init_ticker(ticker, ib,
                              get_float_shares, load_prev_close,
-                             load_avg_intraday_volumes_for, load_todays_volume)
+                             load_avg_intraday_volumes_for, seed_todays_bars)
             )
 
 
-async def _init_ticker(ticker, ib, get_float, load_prev, load_avg_vol, load_today_vol):
+async def _init_ticker(ticker, ib, get_float, load_prev, load_avg_vol, seed_bars):
     if ticker not in STOCKS:
         STOCKS[ticker] = StockState(ticker=ticker)
     state = STOCKS[ticker]
@@ -409,14 +409,16 @@ async def _init_ticker(ticker, ib, get_float, load_prev, load_avg_vol, load_toda
     if not state.avg_by_minute:
         await load_avg_vol(ib, ticker)
 
-    # 4. Seed today's cumulative volume if backend started mid-session
-    if state.volume_today == 0:
-        await load_today_vol(ib, ticker)
+    # 4. Seed today's 1-min bars, 5-min bars and volume_today from IBKR history.
+    #    Without this, bars_1m is empty after restart and vol-spike conditions
+    #    have no bar history to compare against for the first minutes of uptime.
+    if not state.bars_1m:
+        await seed_bars(ib, ticker)
 
     log.debug(
         f"Init done {ticker}: float={state.float_shares}, "
         f"prev_close={state.prev_close:.2f}, "
-        f"avg_vol_minutes={len(state.avg_by_minute)}"
+        f"bars_1m={len(state.bars_1m)}, bars_5m={len(state.bars_5m)}"
     )
 
 

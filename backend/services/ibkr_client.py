@@ -27,7 +27,7 @@ from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID,
     RELVOL_HISTORY_DAYS,
 )
-from scanner.stock_state import STOCKS
+from scanner.stock_state import STOCKS, Bar
 from services.redis_client import get_redis
 
 log = logging.getLogger(__name__)
@@ -212,14 +212,24 @@ async def load_avg_intraday_volumes_for(ib: IB, ticker: str):
 
 
 # ---------------------------------------------------------------------------
-# Today's cumulative volume  (seed volume_today on mid-session restart)
+# Today's bars — seeds bars_1m, bars_5m, volume_today, price on restart
 # ---------------------------------------------------------------------------
 
-async def load_todays_volume(ib: IB, ticker: str):
+async def seed_todays_bars(ib: IB, ticker: str):
+    """
+    Fetch today's 1-min bars from IBKR and fully populate the in-memory state:
+      - bars_1m  (full intraday history for vol-spike condition evaluation)
+      - bars_5m  (aggregated, rebuilt from bars_1m)
+      - volume_today
+      - price (latest close)
+
+    Without this, vol-spike detection has no bar history to compare against
+    for the first minutes after a restart.
+    """
     async with _hist_sem:
         try:
             contract = Stock(ticker, "SMART", "USD")
-            bars = await ib.reqHistoricalDataAsync(
+            raw = await ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime="",
                 durationStr="1 D",
@@ -230,16 +240,67 @@ async def load_todays_volume(ib: IB, ticker: str):
             )
             await asyncio.sleep(2)
 
+            if not raw or ticker not in STOCKS:
+                return
+
             today = datetime.now(ET).date()
-            total = sum(
-                int(b.volume)
-                for b in bars
-                if datetime.fromtimestamp(_bar_ts(b.date), tz=ET).date() == today
+            state = STOCKS[ticker]
+
+            bars_1m: list[Bar] = []
+            for b in raw:
+                ts = datetime.fromtimestamp(_bar_ts(b.date), tz=ET)
+                if ts.date() != today or b.volume <= 0:
+                    continue
+                bar_time = (int(ts.timestamp()) // 60) * 60
+                bars_1m.append(Bar(
+                    time=bar_time,
+                    open=b.open, high=b.high, low=b.low, close=b.close,
+                    volume=int(b.volume),
+                ))
+
+            if not bars_1m:
+                return
+
+            state.bars_1m    = bars_1m
+            state.volume_today = sum(b.volume for b in bars_1m)
+            state.price      = bars_1m[-1].close
+
+            # Rebuild 5-min bars from 1-min bars
+            bars_5m: list[Bar] = []
+            for i in range(len(bars_1m)):
+                # Collect the five 1-min bars that form this 5-min candle
+                anchor = bars_1m[i]
+                if anchor.time % 300 != 0:
+                    continue
+                window = [b for b in bars_1m if anchor.time <= b.time < anchor.time + 300]
+                if not window:
+                    continue
+                five = Bar(
+                    time=anchor.time,
+                    open=window[0].open,
+                    high=max(b.high   for b in window),
+                    low=min(b.low     for b in window),
+                    close=window[-1].close,
+                    volume=sum(b.volume for b in window),
+                )
+                if bars_5m and bars_5m[-1].time == five.time:
+                    bars_5m[-1] = five
+                else:
+                    bars_5m.append(five)
+
+            state.bars_5m = bars_5m
+
+            log.info(
+                f"Seeded {ticker}: {len(bars_1m)} 1m bars, "
+                f"{len(bars_5m)} 5m bars, vol={state.volume_today:,}"
             )
-            if total > 0 and ticker in STOCKS:
-                STOCKS[ticker].volume_today = total
         except Exception as e:
-            log.debug(f"today volume seed failed for {ticker}: {e}")
+            log.warning(f"seed_todays_bars failed for {ticker}: {e}")
+
+
+# Keep old name as alias so nothing else breaks
+async def load_todays_volume(ib: IB, ticker: str):
+    await seed_todays_bars(ib, ticker)
 
 
 # ---------------------------------------------------------------------------
