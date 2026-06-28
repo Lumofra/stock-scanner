@@ -2,18 +2,18 @@
 IBKR real-time data feed.
 
 Two concurrent loops:
-  1. _run_scanner()   — IBKR server-side scanner refreshes every 60s.
-                        Discovers the top active NASDAQ small-caps and
-                        manages which tickers get real-time bar subscriptions.
+  1. Live scanner subscriptions (reqScannerSubscription) — real-time callbacks
+     whenever IBKR scanner results change. Discovers top active NASDAQ small-caps
+     and manages which tickers get real-time bar subscriptions.
 
-  2. _lazy_loader()   — For each new ticker, loads float (yfinance),
-                        prev close, historical volume (for rel vol), and
-                        today's cumulative volume — all via IBKR REST.
+  2. _lazy_loader() — For each new ticker, loads float (yfinance),
+     prev close, historical volume (for rel vol), and today's cumulative
+     volume — all via IBKR REST.
 
 Real-time resolution:
   reqRealTimeBars() delivers 5-second OHLCV bars from IBKR.
   These are aggregated here into 1-minute bars (and then 5-minute bars)
-  to feed the scanner engine, alert engine, and live charts.
+  to feed the scanner engine and live charts.
 
 IBKR simultaneous subscription limit: ~100 tickers on a standard account.
 The scanner keeps us well within that (50–100 results across 3 scan codes).
@@ -32,7 +32,6 @@ from scanner.conditions import evaluate as _eval_conditions
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID,
     MAX_FLOAT, MAX_PRICE, MIN_PRICE,
-    SCANNER_REFRESH_SECONDS,
 )
 
 log = logging.getLogger(__name__)
@@ -63,9 +62,10 @@ def update_scan_params(**kwargs):
         if hasattr(_scan_params, k) and v is not None:
             setattr(_scan_params, k, type(getattr(_scan_params, k))(v))
     log.info(f"Scanner params updated: {asdict(_scan_params)}")
+    # Restart live scanner subscriptions so new params take effect immediately
+    if _ib_ref:
+        _start_live_scanners(_ib_ref)
 
-
-_bar_complete_callbacks: list = []
 
 # Tier 1: reqRealTimeBars — all scanner tickers (5-second bars)
 _active_subs: dict[str, Any] = {}
@@ -82,10 +82,8 @@ _init_started: set[str] = set()
 # Keep IB ref for tier2 promote/demote after initial connect
 _ib_ref: IB | None = None
 
-
-def register_bar_callback(fn):
-    """Register a coroutine called each time a 1-min bar closes."""
-    _bar_complete_callbacks.append(fn)
+# Cached event loop set at startup — used by sync ib_insync callbacks
+_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_tier2_tickers() -> list[str]:
@@ -96,7 +94,7 @@ def get_subscription_counts() -> dict:
         "tier1": len(_active_subs),
         "tier2": len(_tier2_subs),
         "total": len(_active_subs) + len(_tier2_subs),
-        "limit": 100,
+        "limit": 150,  # paper account allows more; live account ~100
     }
 
 
@@ -140,11 +138,7 @@ async def _on_rtbar(ticker: str, bars, has_new_bar: bool):
         if event:
             asyncio.create_task(_publish_event(event))
     else:
-        # New minute started — close the previous bar and notify the alert engine
-        if state.bars_1m:
-            for cb in _bar_complete_callbacks:
-                asyncio.create_task(cb(ticker, state))
-
+        # New minute started
         state.bars_1m.append(Bar(
             time=bar_1m_time,
             open=rtbar.open,
@@ -159,10 +153,11 @@ async def _on_rtbar(ticker: str, bars, has_new_bar: bool):
 
 def _build_5m_bar(state: StockState):
     """Aggregate every 5 completed 1-min bars into a 5-min bar."""
-    bars = list(state.bars_1m)
-    if len(bars) < 5:
+    dq = state.bars_1m
+    if len(dq) < 5:
         return
-    last5 = bars[-5:]
+    # Access last 5 directly via negative indexing (O(1) from deque end)
+    last5 = [dq[-5], dq[-4], dq[-3], dq[-2], dq[-1]]
     if last5[0].time % 300 != 0:
         return
     five = Bar(
@@ -223,9 +218,6 @@ async def _on_mkt_data(ticker: str, t):
                 asyncio.create_task(_publish_event(event))
     else:
         # New minute started
-        if state.bars_1m:
-            for cb in _bar_complete_callbacks:
-                asyncio.create_task(cb(ticker, state))
         state.bars_1m.append(Bar(
             time=bar_time,
             open=t.last, high=t.last, low=t.last, close=t.last,
@@ -248,7 +240,8 @@ def _promote_tier2(ib: IB, ticker: str):
     mkt_ticker = ib.reqMktData(contract, "", False, False)
 
     def on_update(t):
-        asyncio.ensure_future(_on_mkt_data(ticker, t))
+        if _loop:
+            _loop.create_task(_on_mkt_data(ticker, t))
 
     mkt_ticker.updateEvent += on_update
     _tier2_subs[ticker] = mkt_ticker
@@ -306,7 +299,8 @@ def _subscribe(ib: IB, ticker: str):
     bars = ib.reqRealTimeBars(contract, 5, "TRADES", useRTH=False)
 
     def on_update(bars, has_new_bar):
-        asyncio.ensure_future(_on_rtbar(ticker, bars, has_new_bar))
+        if _loop:
+            _loop.create_task(_on_rtbar(ticker, bars, has_new_bar))
 
     bars.updateEvent += on_update
     _active_subs[ticker] = bars
@@ -329,7 +323,7 @@ def _sync_subscriptions(ib: IB, wanted: set[str]):
 
 
 # ---------------------------------------------------------------------------
-# IBKR server-side scanner — runs three scan codes, unions the results
+# IBKR live scanner — reqScannerSubscription (real-time, replaces 60s polling)
 # ---------------------------------------------------------------------------
 
 # Scan codes that surface "in-play" small-caps:
@@ -338,65 +332,78 @@ def _sync_subscriptions(ib: IB, wanted: set[str]):
 #   TOP_PERC_GAIN    — biggest % gainers (momentum alerts)
 _SCAN_CODES = ["MOST_ACTIVE_USD", "HOT_BY_VOLUME", "TOP_PERC_GAIN"]
 
+# Live subscription state
+_live_scanner_subs: list = []                   # list of (scan_code, ScanDataList)
+_current_scan_results: dict[str, set[str]] = {} # scan_code → set of symbols
 
-async def _run_scanner(ib: IB):
-    while True:
+
+def _on_scan_update(scan_data_list, scan_code: str):
+    """Called by ib_insync in real-time whenever scanner results change."""
+    found_this_code = {sd.contractDetails.contract.symbol for sd in scan_data_list}
+    _current_scan_results[scan_code] = found_this_code
+
+    all_found = set().union(*_current_scan_results.values())
+    if not all_found:
+        return
+
+    log.info(
+        f"Scanner update [{scan_code}]: {len(found_this_code)} → "
+        f"{len(all_found)} total ({', '.join(sorted(found_this_code)[:5])}...)"
+    )
+
+    now = time.time()
+    for t in all_found:
+        is_new = t not in STOCKS
+        if is_new:
+            STOCKS[t] = StockState(ticker=t)
+        state = STOCKS[t]
+        if state.first_seen == 0:
+            state.first_seen = now
+        state.hit_count += 1
+        state.last_seen = now
+        if t not in _init_started:
+            _needs_init.add(t)
+        if is_new and _loop:
+            _loop.create_task(_check_news_trigger(t))
+
+    ib = _ib_ref
+    if ib:
+        _sync_subscriptions(ib, all_found)
+
+
+def _start_live_scanners(ib: IB):
+    """Create one live reqScannerSubscription per scan code."""
+    _stop_live_scanners(ib)
+    p = get_scan_params()
+    for scan_code in _SCAN_CODES:
+        sub = ScannerSubscription(
+            instrument="STK",
+            locationCode="STK.NASDAQ",
+            scanCode=scan_code,
+            numberOfRows=50,
+            abovePrice=p.min_price,
+            belowPrice=p.max_price,
+            marketCapBelow=p.max_market_cap,
+        )
         try:
-            found: set[str] = set()
-
-            # Volume threshold depends on session:
-            # RTH (9:30–16:00 ET): 50k — filters noise, keeps real movers
-            # Extended hours: 2k — pre/post market has much lower volume
-            et_min = _et_minute_of_day(int(time.time()))
-            is_rth = 330 <= et_min < 720   # 09:30–16:00 relative to 4 AM offset
-            vol_threshold = 50_000 if is_rth else 2_000
-
-            p = get_scan_params()
-            for scan_code in _SCAN_CODES:
-                sub = ScannerSubscription(
-                    instrument="STK",
-                    locationCode="STK.NASDAQ",
-                    scanCode=scan_code,
-                    numberOfRows=50,
-                    abovePrice=p.min_price,
-                    belowPrice=p.max_price,
-                    aboveVolume=vol_threshold,
-                    marketCapBelow=p.max_market_cap,
-                )
-                try:
-                    scan_data = await ib.reqScannerDataAsync(sub)
-                    for sd in scan_data:
-                        found.add(sd.contractDetails.contract.symbol)
-                except Exception as e:
-                    log.warning(f"Scanner {scan_code} error: {e}")
-                await asyncio.sleep(2)  # brief gap between scanner requests
-
-            if found:
-                log.info(
-                    f"Scanner results: {len(found)} tickers "
-                    f"({', '.join(sorted(found)[:8])}{'...' if len(found) > 8 else ''})"
-                )
-                _sync_subscriptions(ib, found)
-                now = time.time()
-                for t in found:
-                    is_new = t not in STOCKS
-                    if is_new:
-                        STOCKS[t] = StockState(ticker=t)
-                    state = STOCKS[t]
-                    if state.first_seen == 0:
-                        state.first_seen = now
-                    state.hit_count += 1
-                    state.last_seen = now
-                    if t not in _init_started:
-                        _needs_init.add(t)
-                    if is_new:
-                        # Immediately check news for brand-new scanner entries
-                        asyncio.create_task(_check_news_trigger(t))
-
+            sdl = ib.reqScannerSubscription(sub)
+            sdl.updateEvent += lambda s, sc=scan_code: _on_scan_update(s, sc)
+            _live_scanner_subs.append((scan_code, sdl))
+            log.info(f"Live scanner subscription started: {scan_code}")
         except Exception as e:
-            log.error(f"Scanner loop error: {e}")
+            log.error(f"Failed to start scanner subscription {scan_code}: {e}")
 
-        await asyncio.sleep(SCANNER_REFRESH_SECONDS)
+
+def _stop_live_scanners(ib: IB):
+    """Cancel all active live scanner subscriptions."""
+    for scan_code, sdl in _live_scanner_subs:
+        try:
+            ib.cancelScannerSubscription(sdl)
+            log.info(f"Cancelled scanner subscription: {scan_code}")
+        except Exception as e:
+            log.warning(f"Error cancelling scanner sub {scan_code}: {e}")
+    _live_scanner_subs.clear()
+    _current_scan_results.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +510,8 @@ async def _check_news_trigger(ticker: str):
 async def start_feed():
     """Connect to IB Gateway, then run scanner + real-time bars indefinitely."""
     from services.ibkr_client import connect_ib
-    global _ib_ref
+    global _ib_ref, _loop
+    _loop = asyncio.get_running_loop()
 
     while True:
         try:
@@ -514,7 +522,7 @@ async def start_feed():
                 if t in STOCKS:
                     _promote_tier2(ib, t)
 
-            asyncio.create_task(_run_scanner(ib), name="ibkr_scanner")
+            _start_live_scanners(ib)
             asyncio.create_task(_lazy_loader(ib), name="lazy_loader")
 
             # Stay alive until IB Gateway disconnects
@@ -522,6 +530,7 @@ async def start_feed():
                 await asyncio.sleep(5)
 
             log.warning("IB Gateway connection lost — reconnecting in 10s")
+            _stop_live_scanners(ib)
 
         except ConnectionRefusedError:
             log.error(

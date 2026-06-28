@@ -15,9 +15,8 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router
-from api.websocket import scanner_ws, alerts_ws, chart_ws, events_ws
-from scanner.alert_engine import on_bar_complete
-from scanner.data_feed import register_bar_callback, start_feed
+from api.websocket import scanner_ws, chart_ws, events_ws
+from scanner.data_feed import start_feed
 from scanner.news_poller import run_news_poller
 from scanner.stock_state import STOCKS
 from services.redis_client import close_redis
@@ -44,8 +43,6 @@ app.include_router(router)
 async def startup():
     log.info("=== Stock Scanner starting up (IBKR feed) ===")
 
-    register_bar_callback(on_bar_complete)
-
     # Start IBKR feed — connects to Gateway, runs scanner + real-time bars
     asyncio.create_task(start_feed(), name="ibkr_feed")
 
@@ -69,11 +66,6 @@ async def ws_scanner(websocket: WebSocket):
     await scanner_ws(websocket)
 
 
-@app.websocket("/ws/alerts")
-async def ws_alerts(websocket: WebSocket):
-    await alerts_ws(websocket)
-
-
 @app.websocket("/ws/chart/{ticker}/{timeframe}")
 async def ws_chart(websocket: WebSocket, ticker: str, timeframe: str):
     await chart_ws(websocket, ticker, timeframe)
@@ -85,6 +77,7 @@ async def ws_events(websocket: WebSocket):
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health():
     active = sum(1 for s in STOCKS.values() if s.price > 0)
     from scanner.data_feed import get_subscription_counts, get_scan_params

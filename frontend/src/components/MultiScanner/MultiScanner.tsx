@@ -1,5 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore, ScannerRow, ScannerConfig, ScannerEvent } from "../../store";
+
+// Global chime guard — prevents double-play when multiple scanners fire on the same event
+let _lastChimeAt = 0;
+
+function playChime() {
+  const now = Date.now();
+  if (now - _lastChimeAt < 2000) return; // 2 sec global cooldown between chimes
+  _lastChimeAt = now;
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(660, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.07, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.5);
+    osc.onended = () => ctx.close();
+  } catch (_) {}
+}
 import { useScanner } from "../../hooks/useScanner";
 import { useEvents } from "../../hooks/useEvents";
 import { ScannerConfigModal } from "./ScannerConfigModal";
@@ -99,12 +123,15 @@ function applyFilters(rows: ScannerRow[], f: ScannerConfig["filters"]): ScannerR
 }
 
 function TopListPanel({ config, height, onDragHandle, isLast }: ScannerPanelProps) {
-  const rows           = useStore((s) => s.scannerRows);
-  const selectedTicker = useStore((s) => s.selectedTicker);
-  const selectTicker   = useStore((s) => s.selectTicker);
-  const setTrigger     = useStore((s) => s.setTriggerTicker);
-  const scannerConfigs = useStore((s) => s.scannerConfigs);
-  const removeScanner  = useStore((s) => s.removeScanner);
+  const rows                = useStore((s) => s.scannerRows);
+  const selectedTicker      = useStore((s) => s.selectedTicker);
+  const selectTicker        = useStore((s) => s.selectTicker);
+  const setTrigger          = useStore((s) => s.setTriggerTicker);
+  const watchlist           = useStore((s) => s.watchlist);
+  const addToWatchlist      = useStore((s) => s.addToWatchlist);
+  const removeFromWatchlist = useStore((s) => s.removeFromWatchlist);
+  const scannerConfigs      = useStore((s) => s.scannerConfigs);
+  const removeScanner       = useStore((s) => s.removeScanner);
 
   const prevRef = useRef<Set<string>>(new Set());
   const filtered = applyFilters(rows, config.filters);
@@ -142,10 +169,13 @@ function TopListPanel({ config, height, onDragHandle, isLast }: ScannerPanelProp
                   {TOPLIST_COL_LABELS[c] ?? c}
                 </th>
               ))}
+              <th className="w-5" />
             </tr>
           </thead>
           <tbody>
-            {filtered.map((row) => (
+            {filtered.map((row) => {
+              const inWatch = watchlist.includes(row.ticker);
+              return (
               <tr key={row.ticker} onClick={() => selectTicker(selectedTicker === row.ticker ? null : row.ticker)}
                 className={`border-b border-[#21262d] cursor-pointer transition-colors ${
                   selectedTicker === row.ticker ? "bg-[#1f2937]" : "hover:bg-[#161b22]"
@@ -155,8 +185,16 @@ function TopListPanel({ config, height, onDragHandle, isLast }: ScannerPanelProp
                   {row.ticker}<NewsBadge row={row} />
                 </td>
                 {cols.map((c) => <TopListCell key={c} col={c} row={row} />)}
+                <td className="pr-1 text-center">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); inWatch ? removeFromWatchlist(row.ticker) : addToWatchlist(row.ticker); }}
+                    title={inWatch ? "Fjern fra watchlist" : "Legg til i watchlist"}
+                    className={`text-[11px] leading-none ${inWatch ? "text-yellow-400" : "text-[#30363d] hover:text-yellow-400"}`}
+                  >★</button>
+                </td>
               </tr>
-            ))}
+              );
+            })}
             {filtered.length === 0 && (
               <tr><td colSpan={cols.length + 1} className="px-2 py-4 text-center text-[#444c56] text-[10px]">
                 {rows.length === 0 ? "Venter på data..." : "Ingen treff"}
@@ -192,24 +230,28 @@ const EVENT_COL_LABELS: Record<string, string> = {
 };
 
 function EventsPanel({ config, height, onDragHandle, isLast }: ScannerPanelProps) {
-  const selectTicker   = useStore((s) => s.selectTicker);
-  const setTrigger     = useStore((s) => s.setTriggerTicker);
-  const scannerConfigs = useStore((s) => s.scannerConfigs);
-  const removeScanner  = useStore((s) => s.removeScanner);
+  const selectTicker        = useStore((s) => s.selectTicker);
+  const setTrigger          = useStore((s) => s.setTriggerTicker);
+  const watchlist           = useStore((s) => s.watchlist);
+  const addToWatchlist      = useStore((s) => s.addToWatchlist);
+  const removeFromWatchlist = useStore((s) => s.removeFromWatchlist);
+  const scannerConfigs      = useStore((s) => s.scannerConfigs);
+  const removeScanner       = useStore((s) => s.removeScanner);
 
   const events = useEvents(config.eventCondition);
   const [editingId, setEditingId] = useState<string | null>(null);
   const cols = config.columns;
 
-  // Auto-switch: new event → update trigger chart
+  // Auto-switch + sound + flash on new event
   const prevEventTime = useRef<number>(0);
   useEffect(() => {
-    if (!config.filters.autoSwitch || events.length === 0) return;
+    if (events.length === 0) return;
     const latest = events[0];
-    if (latest.timestamp !== prevEventTime.current) {
-      prevEventTime.current = latest.timestamp;
-      setTrigger(latest.ticker);
-    }
+    if (latest.timestamp === prevEventTime.current) return;
+    prevEventTime.current = latest.timestamp;
+
+    if (config.filters.autoSwitch) setTrigger(latest.ticker);
+    if (config.alertsEnabled) playChime();
   }, [events]);
 
   return (
@@ -231,22 +273,33 @@ function EventsPanel({ config, height, onDragHandle, isLast }: ScannerPanelProps
                   {EVENT_COL_LABELS[c] ?? c}
                 </th>
               ))}
+              <th className="w-5" />
             </tr>
           </thead>
           <tbody>
-            {events.map((ev, i) => (
+            {events.map((ev, i) => {
+              const inWatch = watchlist.includes(ev.ticker);
+              return (
               <tr key={`${ev.ticker}-${ev.timestamp}`}
-                onClick={() => { selectTicker(ev.ticker); setTrigger(ev.ticker); }}
+                onClick={() => selectTicker(ev.ticker)}
                 className={`border-b border-[#21262d] cursor-pointer hover:bg-[#161b22] transition-colors ${
-                  i === 0 ? "bg-[#0d1a0d]" : ""
-                }`}
+                  config.alertsEnabled && i === 0 ? "row-flash" : ""
+                } ${i === 0 ? "bg-[#0d1a0d]" : ""}`}
               >
                 <td className="px-2 py-1 font-bold text-white">
                   {ev.ticker}<NewsBadge row={ev} />
                 </td>
                 {cols.map((c) => <EventCell key={c} col={c} ev={ev} lookback={config.eventCondition.lookback} />)}
+                <td className="pr-1 text-center">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); inWatch ? removeFromWatchlist(ev.ticker) : addToWatchlist(ev.ticker); }}
+                    title={inWatch ? "Fjern fra watchlist" : "Legg til i watchlist"}
+                    className={`text-[11px] leading-none ${inWatch ? "text-yellow-400" : "text-[#30363d] hover:text-yellow-400"}`}
+                  >★</button>
+                </td>
               </tr>
-            ))}
+              );
+            })}
             {events.length === 0 && (
               <tr><td colSpan={cols.length + 1} className="px-2 py-4 text-center text-[#444c56] text-[10px]">
                 Venter på vol-spike ≥ {config.eventCondition.multiplier}× siste {config.eventCondition.lookback} min...

@@ -4,14 +4,19 @@ Mid-bar real-time condition evaluation.
 Runs on every 5-second rtbar update so events fire immediately when a
 threshold is crossed — not waiting for the bar to close.
 
-Each event is deduplicated per ticker per bar: once an event fires for a
-given bar_time it won't fire again for the same bar (avoids spam on each
-5s update). It WILL re-fire on the next bar if the condition still holds.
+Bracket-based deduplication: fires a new event when the vol ratio crosses
+a higher bracket within the same bar. This lets scanners with different
+multiplier thresholds each catch the event relevant to them, while still
+preventing spam (max ~7 events per ticker per bar in extreme cases).
 
-Hit counter (_hits) is session-based (resets on backend restart) which is
-fine for intraday scalping.
+Example for a ticker escalating within one bar:
+  4×  → fires  (crosses 3× bracket)   — Scanner A (3×) sees it
+  10× → fires  (crosses 8× bracket)   — Scanner B (8×) sees it
+  16× → fires  (crosses 15× bracket)  — Scanner C (15×) sees it
+
+Hit counter (_hits) is session-based (resets on backend restart).
 """
-import json
+import itertools
 import logging
 import time
 from collections import defaultdict
@@ -20,14 +25,25 @@ from scanner.stock_state import StockState
 
 log = logging.getLogger(__name__)
 
-# Minimum ratio to emit (filters noise; frontend can require higher)
-_MIN_EMIT_RATIO = 2.0
+# Bracket levels — new event fires each time ratio crosses the next bracket
+_BRACKETS = (2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0)
 
 # Lookback windows included in every event payload
 _LOOKBACKS = (1, 3, 5, 10)
 
-# {ticker: {event_type: last_bar_time}} — deduplication
-_last_fired: dict[str, dict[str, int]] = defaultdict(dict)
+# Number of bars we actually need: max lookback + 1 (the current bar)
+_N_BARS_NEEDED = max(_LOOKBACKS) + 1  # = 11
+
+
+def _top_bracket(ratio: float) -> float:
+    """Highest bracket the ratio has crossed, or 0 if below minimum."""
+    for t in reversed(_BRACKETS):
+        if ratio >= t:
+            return t
+    return 0.0
+
+# {ticker: (bar_time, bracket)} — tracks last fired bracket per bar
+_last_fired: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))
 
 # {ticker: hit_count} — session hit counter
 _hits: dict[str, int] = defaultdict(int)
@@ -51,22 +67,26 @@ def evaluate(ticker: str, state: StockState) -> dict | None:
     Check all configured conditions mid-bar.
     Returns an event dict if a new condition fires, else None.
     """
-    bars = list(state.bars_1m)
-    if len(bars) < max(_LOOKBACKS) + 1 or state.price == 0:
+    dq = state.bars_1m
+    if len(dq) < _N_BARS_NEEDED or state.price == 0:
         return None
+    # Copy only the tail we need (11 bars) instead of the full 480-bar deque
+    bars = list(itertools.islice(reversed(dq), _N_BARS_NEEDED))
+    bars.reverse()
 
     ratios = _vol_ratios(bars)
 
-    # Gate: at minimum a 2× spike on the 5-bar window
     ratio_5 = ratios.get(5, 0)
-    if ratio_5 < _MIN_EMIT_RATIO:
+    bracket = _top_bracket(ratio_5)
+    if bracket == 0:
         return None
 
-    # Deduplicate within same bar
+    # Fire when ratio crosses a new bracket — allows escalation events within same bar
     bar_time = bars[-1].time
-    if _last_fired[ticker].get("vol_spike") == bar_time:
+    last_bar_time, last_bracket = _last_fired[ticker]
+    if last_bar_time == bar_time and last_bracket >= bracket:
         return None
-    _last_fired[ticker]["vol_spike"] = bar_time
+    _last_fired[ticker] = (bar_time, bracket)
 
     _hits[ticker] += 1
 

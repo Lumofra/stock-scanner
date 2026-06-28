@@ -47,10 +47,13 @@ function Empty({ text }: { text: string }) {
 }
 
 export default function App() {
-  const selectedTicker   = useStore((s) => s.selectedTicker);
-  const selectTicker     = useStore((s) => s.selectTicker);
-  const triggerTicker    = useStore((s) => s.triggerTicker);
-  const setTriggerTicker = useStore((s) => s.setTriggerTicker);
+  const selectedTicker      = useStore((s) => s.selectedTicker);
+  const selectTicker        = useStore((s) => s.selectTicker);
+  const triggerTicker       = useStore((s) => s.triggerTicker);
+  const setTriggerTicker    = useStore((s) => s.setTriggerTicker);
+  const watchlist           = useStore((s) => s.watchlist);
+  const addToWatchlist      = useStore((s) => s.addToWatchlist);
+  const removeFromWatchlist = useStore((s) => s.removeFromWatchlist);
 
   const [leftWidth,  setLeftWidth]  = useState(300);  // scanner panel px
   const [watchWidth, setWatchWidth] = useState(260);  // watch panel px
@@ -60,6 +63,16 @@ export default function App() {
 
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const drag         = useRef<DragInfo | null>(null);
+
+  // Sync selectedTicker → DAS Trader top montage
+  useEffect(() => {
+    if (!selectedTicker) return;
+    fetch("/api/das/symbol", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: selectedTicker }),
+    }).catch(() => {});
+  }, [selectedTicker]);
   const stateRef     = useRef({ leftWidth, watchWidth, colSplit, rowSplit });
   stateRef.current   = { leftWidth, watchWidth, colSplit, rowSplit };
 
@@ -128,6 +141,12 @@ export default function App() {
 
           {/* IBKR subscription counter */}
           <IBKRCounter />
+
+          {/* Vertical separator */}
+          <div className="w-px h-4 bg-[#30363d]" />
+
+          {/* Market indices */}
+          <IndexBar />
         </div>
         <MarketStatus />
       </header>
@@ -171,7 +190,14 @@ export default function App() {
                 className="text-xs bg-[#21262d] hover:bg-[#30363d] text-[#8b949e] hover:text-white rounded px-2 py-1 border border-[#30363d]"
               >↵</button>
               {selectedTicker && (
-                <button onClick={() => selectTicker(null)} className="text-[10px] text-[#444c56] hover:text-[#8b949e] ml-1">×</button>
+                <>
+                  <button
+                    onClick={() => watchlist.includes(selectedTicker) ? removeFromWatchlist(selectedTicker) : addToWatchlist(selectedTicker)}
+                    title={watchlist.includes(selectedTicker) ? "Fjern fra watchlist" : "Legg til i watchlist"}
+                    className={`text-[11px] ml-1 ${watchlist.includes(selectedTicker) ? "text-yellow-400" : "text-[#444c56] hover:text-yellow-400"}`}
+                  >★</button>
+                  <button onClick={() => selectTicker(null)} className="text-[10px] text-[#444c56] hover:text-[#8b949e] ml-1">×</button>
+                </>
               )}
             </div>
           </div>
@@ -207,9 +233,12 @@ export default function App() {
                           onClick={() => selectTicker(triggerTicker)}
                           title="Send ticker til de tre andre chartene"
                           className="text-[9px] bg-blue-700 hover:bg-blue-600 text-white rounded px-1.5 py-0.5 ml-1"
-                        >
-                          → charts
-                        </button>
+                        >→ charts</button>
+                        <button
+                          onClick={() => watchlist.includes(triggerTicker) ? removeFromWatchlist(triggerTicker) : addToWatchlist(triggerTicker)}
+                          title={watchlist.includes(triggerTicker) ? "Fjern fra watchlist" : "Legg til i watchlist"}
+                          className={`text-[11px] ml-1 ${watchlist.includes(triggerTicker) ? "text-yellow-400" : "text-[#444c56] hover:text-yellow-400"}`}
+                        >★</button>
                         <button onClick={() => setTriggerTicker(null)} className="text-[10px] text-[#444c56] hover:text-[#8b949e] ml-0.5">×</button>
                       </>
                     )}
@@ -375,7 +404,7 @@ function IBKRCounter() {
   useEffect(() => {
     async function poll() {
       try {
-        const r = await fetch("/health");
+        const r = await fetch("/api/health");
         const d = await r.json();
         if (d.subscriptions) setSubs(d.subscriptions);
       } catch {}
@@ -444,9 +473,82 @@ function IBKRCounter() {
   );
 }
 
+// Market index bar — NASDAQ, S&P 500, DOW
+function IndexBar() {
+  const [data, setData] = useState<Record<string, { price: number | null; change_pct: number | null }>>({});
+
+  useEffect(() => {
+    const poll = () =>
+      fetch("/api/market/indices").then(r => r.json()).then(setData).catch(() => {});
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const entries = Object.entries(data);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="flex items-center gap-3">
+      {entries.map(([name, d]) => {
+        const chg = d.change_pct;
+        const up = chg !== null && chg >= 0;
+        const color = chg === null ? "text-[#444c56]" : up ? "text-[#26a69a]" : "text-red-400";
+        return (
+          <div key={name} className="flex items-center gap-1">
+            <span className="text-[9px] text-[#444c56]">{name}</span>
+            <span className={`text-[9px] font-semibold tabular-nums ${color}`}>
+              {chg === null ? "–" : `${up ? "+" : ""}${chg.toFixed(2)}%`}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface ScanParams {
   min_price: number; max_price: number;
   max_float: number; max_market_cap: number;
+}
+
+function TickerListModal({ onClose }: { onClose: () => void }) {
+  const [tickers, setTickers] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/stocks")
+      .then((r) => r.json())
+      .then((d) => { setTickers(d.tickers ?? []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-96 p-5 max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-white">Observerte tickers ({tickers.length})</h2>
+          <button onClick={onClose} className="text-[#8b949e] hover:text-white text-lg leading-none">×</button>
+        </div>
+        <p className="text-[9px] text-[#444c56] mb-3">Alle tickers som nå overvåkes med Tier 1 (5-sek barer).</p>
+        {loading ? (
+          <div className="text-[10px] text-[#444c56] text-center py-4">Laster...</div>
+        ) : tickers.length === 0 ? (
+          <div className="text-[10px] text-[#444c56] text-center py-4">Ingen tickers funnet</div>
+        ) : (
+          <div className="overflow-y-auto flex-1">
+            <div className="grid grid-cols-5 gap-1">
+              {tickers.map((t) => (
+                <div key={t} className="bg-[#0d1117] border border-[#21262d] rounded px-1.5 py-1 text-[10px] text-[#8b949e] text-center font-mono">
+                  {t}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function ScannerUniverseModal({ params, onClose, onSaved }: {
@@ -458,9 +560,10 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
   const [stats, setStats]   = useState<{ tracked: number; active: number; t1: number; t2: number } | null>(null);
+  const [showTickers, setShowTickers] = useState(false);
 
   useEffect(() => {
-    fetch("/health")
+    fetch("/api/health")
       .then((r) => r.json())
       .then((d) => setStats({
         tracked: d.tracked_tickers ?? 0,
@@ -525,6 +628,15 @@ function ScannerUniverseModal({ params, onClose, onSaved }: {
             <span className="text-[9px] text-[#444c56] w-full text-center">Backend ikke tilkoblet</span>
           )}
         </div>
+        {stats && (
+          <button
+            onClick={() => setShowTickers(true)}
+            className="w-full text-[10px] text-blue-400 hover:text-blue-300 text-center mb-3 underline underline-offset-2"
+          >
+            Se alle observerte tickers →
+          </button>
+        )}
+        {showTickers && <TickerListModal onClose={() => setShowTickers(false)} />}
         <p className="text-[9px] text-[#444c56] mb-4 leading-relaxed">
           IBKR-scanneren returnerer maks 50 tickers per søk × 3 søk = <span className="text-[#8b949e]">maks ~150 unike tickers</span> — alltid de mest aktive akkurat nå.
           Nye tickers oppdages innen ~60 sek (scanner-refresh).

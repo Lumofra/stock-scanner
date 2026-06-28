@@ -20,20 +20,6 @@ export interface ScannerRow {
   last_seen: number;   // ms timestamp
 }
 
-export interface Alert {
-  id: string;
-  ticker: string;
-  alert_type: "volume_breakout" | "price_spike_5pct" | string;
-  price: number;
-  volume: number;
-  rel_vol: number;
-  change_pct: number;
-  float: number | null;
-  has_news: boolean;
-  timestamp: number;
-  bars_1m: Bar[];
-}
-
 export interface Bar {
   time: number;
   open: number;
@@ -79,6 +65,7 @@ export interface ScannerConfig {
   filters: ScannerFilters;           // used by toplist
   eventCondition: EventCondition;    // used by events
   columns: string[];                 // selected columns for display
+  alertsEnabled: boolean;            // sound + flash on new events
 }
 
 export interface ScannerEvent {
@@ -119,6 +106,7 @@ const DEFAULT_SCANNERS: ScannerConfig[] = [
     filters: { ...BASE_FILTERS, minRelVol: 3, minChangePct: 3, minVolume: 100, autoSwitch: true },
     eventCondition: BASE_EVENT,
     columns: ["price", "change_pct", "rel_vol", "float", "has_news"],
+    alertsEnabled: false,
   },
   {
     id: "top-gainers",
@@ -127,6 +115,7 @@ const DEFAULT_SCANNERS: ScannerConfig[] = [
     filters: { ...BASE_FILTERS, minRelVol: 2, minChangePct: 10, sortBy: "change_pct" },
     eventCondition: BASE_EVENT,
     columns: ["price", "change_pct", "rel_vol", "float", "has_news"],
+    alertsEnabled: false,
   },
   {
     id: "vol-spike-events",
@@ -135,6 +124,7 @@ const DEFAULT_SCANNERS: ScannerConfig[] = [
     filters: BASE_FILTERS,
     eventCondition: { ...BASE_EVENT, multiplier: 5, lookback: 5 },
     columns: ["time", "price", "change_pct", "vol_ratio", "rel_vol", "float", "has_news", "hits"],
+    alertsEnabled: false,
   },
   {
     id: "news-catalyst",
@@ -143,6 +133,7 @@ const DEFAULT_SCANNERS: ScannerConfig[] = [
     filters: { ...BASE_FILTERS, minRelVol: 1, minChangePct: 2, hasNewsOnly: true, sortBy: "rel_vol" },
     eventCondition: BASE_EVENT,
     columns: ["price", "change_pct", "rel_vol", "float", "has_news"],
+    alertsEnabled: false,
   },
 ];
 
@@ -155,12 +146,6 @@ interface Store {
 
   triggerTicker: string | null;
   setTriggerTicker: (ticker: string | null) => void;
-
-  alerts: Alert[];
-  addAlert: (alert: Alert) => void;
-
-  soundEnabled: boolean;
-  toggleSound: () => void;
 
   scannerConfigs: ScannerConfig[];
   addScanner: () => void;
@@ -182,13 +167,6 @@ export const useStore = create<Store>((set) => ({
   triggerTicker: null,
   setTriggerTicker: (ticker) => set({ triggerTicker: ticker }),
 
-  alerts: [],
-  addAlert: (alert) =>
-    set((state) => ({ alerts: [alert, ...state.alerts].slice(0, 100) })),
-
-  soundEnabled: true,
-  toggleSound: () => set((s) => ({ soundEnabled: !s.soundEnabled })),
-
   scannerConfigs: DEFAULT_SCANNERS,
   addScanner: () =>
     set((s) => ({
@@ -197,7 +175,11 @@ export const useStore = create<Store>((set) => ({
         {
           id: `scanner-${Date.now()}`,
           name: `Scanner ${s.scannerConfigs.length + 1}`,
-          filters: { ...BASE },
+          mode: "toplist" as const,
+          filters: { ...BASE_FILTERS },
+          eventCondition: { ...BASE_EVENT },
+          columns: ["price", "change_pct", "rel_vol", "float", "has_news"],
+          alertsEnabled: false,
         },
       ],
     })),

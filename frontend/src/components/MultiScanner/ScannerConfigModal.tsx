@@ -71,11 +71,12 @@ export function ScannerConfigModal({ config, onClose }: Props) {
   const removeScanner  = useStore((s) => s.removeScanner);
   const scannerConfigs = useStore((s) => s.scannerConfigs);
 
-  const [name,    setName]    = useState(config.name);
-  const [mode,    setMode]    = useState<ScannerMode>(config.mode);
-  const [f,       setF]       = useState<ScannerFilters>({ ...config.filters });
-  const [ec,      setEc]      = useState<EventCondition>({ ...config.eventCondition });
-  const [columns, setColumns] = useState<string[]>(config.columns);
+  const [name,          setName]          = useState(config.name);
+  const [mode,          setMode]          = useState<ScannerMode>(config.mode);
+  const [f,             setF]             = useState<ScannerFilters>({ ...config.filters });
+  const [ec,            setEc]            = useState<EventCondition>({ ...config.eventCondition });
+  const [columns,       setColumns]       = useState<string[]>(config.columns);
+  const [alertsEnabled, setAlertsEnabled] = useState(config.alertsEnabled ?? false);
 
   const setFld  = <K extends keyof ScannerFilters>(k: K, v: ScannerFilters[K]) => setF((p) => ({ ...p, [k]: v }));
   const setEcFld = <K extends keyof EventCondition>(k: K, v: EventCondition[K]) => setEc((p) => ({ ...p, [k]: v }));
@@ -85,7 +86,7 @@ export function ScannerConfigModal({ config, onClose }: Props) {
   }
 
   function save() {
-    updateScanner(config.id, { name, mode, filters: f, eventCondition: ec, columns });
+    updateScanner(config.id, { name, mode, filters: f, eventCondition: ec, columns, alertsEnabled });
     onClose();
   }
 
@@ -227,6 +228,12 @@ export function ScannerConfigModal({ config, onClose }: Props) {
             <div className="flex items-center gap-3">
               <Toggle value={f.autoSwitch} onChange={(v) => setFld("autoSwitch", v)} />
               <span className="text-xs text-[#8b949e]">Bytt trigger-chart umiddelbart på nytt event</span>
+            </div>
+          </Section>
+          <Section title="Lyd- og flash-varsler">
+            <div className="flex items-center gap-3">
+              <Toggle value={alertsEnabled} onChange={setAlertsEnabled} />
+              <span className="text-xs text-[#8b949e]">Spill lyd og flash rad ved nytt event</span>
             </div>
           </Section>
         </>}

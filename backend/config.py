@@ -25,11 +25,12 @@ MAX_FLOAT: int = 30_000_000
 MAX_PRICE: float = 25.0
 MIN_PRICE: float = 1.00
 
-# How often the IBKR server-side scanner refreshes (seconds)
-SCANNER_REFRESH_SECONDS: int = 60
-
 # Days of 1-min history used to compute average intraday volume (rel vol baseline)
 RELVOL_HISTORY_DAYS: int = 10
 
-# Minimum seconds between repeat alerts for the same ticker
-ALERT_COOLDOWN_SECONDS: int = 60
+# ---------------------------------------------------------------------------
+# DAS Trader Remote API
+# Enable in DAS: Setup → API Settings → Enable API, set port
+# ---------------------------------------------------------------------------
+DAS_HOST: str = os.getenv("DAS_HOST", "127.0.0.1")
+DAS_PORT: int = int(os.getenv("DAS_PORT", "9910"))

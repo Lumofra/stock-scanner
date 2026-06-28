@@ -1,8 +1,7 @@
 """
 WebSocket endpoints:
-  /ws/scanner          — scanner table rows (pushes every 1s, live data)
+  /ws/scanner          — scanner table rows (pushes on change, max 1s cadence)
   /ws/events           — live event stream (vol spike, etc.) pushed on trigger
-  /ws/alerts           — alert feed (pushed on new alert)
   /ws/chart/{ticker}/{timeframe}  — live bar updates, mid-bar aware
 """
 import asyncio
@@ -19,13 +18,17 @@ log = logging.getLogger(__name__)
 
 
 async def scanner_ws(websocket: WebSocket):
-    """Push full scanner results every second."""
+    """Push scanner results every second, but only when data changed."""
     await websocket.accept()
     log.info("Scanner WS client connected")
+    last_json = ""
     try:
         while True:
             results = get_scanner_results()
-            await websocket.send_text(json.dumps({"type": "scanner", "data": results}))
+            new_json = json.dumps({"type": "scanner", "data": results})
+            if new_json != last_json:
+                await websocket.send_text(new_json)
+                last_json = new_json
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         log.info("Scanner WS client disconnected")
@@ -53,25 +56,6 @@ async def events_ws(websocket: WebSocket):
         log.error(f"Events WS error: {e}")
     finally:
         await pubsub.unsubscribe("events:new")
-        await pubsub.aclose()
-
-
-async def alerts_ws(websocket: WebSocket):
-    await websocket.accept()
-    log.info("Alerts WS client connected")
-    redis = get_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe("alerts:new")
-    try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                await websocket.send_text(message["data"])
-    except WebSocketDisconnect:
-        log.info("Alerts WS client disconnected")
-    except Exception as e:
-        log.error(f"Alerts WS error: {e}")
-    finally:
-        await pubsub.unsubscribe("alerts:new")
         await pubsub.aclose()
 
 

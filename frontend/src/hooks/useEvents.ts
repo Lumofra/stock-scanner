@@ -16,10 +16,13 @@ export function useEvents(condition: EventCondition) {
       ws.onmessage = (e) => {
         const ev: ScannerEvent = JSON.parse(e.data);
         if (!passesCondition(ev, condition)) return;
-
         setEvents((prev) => {
-          // Avoid duplicate for same ticker+bar_time
-          if (prev[0]?.ticker === ev.ticker && prev[0]?.bar_time === ev.bar_time) return prev;
+          // Allow escalation events within the same bar (higher vol_ratio = higher bracket)
+          if (
+            prev[0]?.ticker === ev.ticker &&
+            prev[0]?.bar_time === ev.bar_time &&
+            ev.vol_ratio_5 <= (prev[0]?.vol_ratio_5 ?? 0)
+          ) return prev;
           return [ev, ...prev].slice(0, MAX_EVENTS);
         });
       };

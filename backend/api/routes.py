@@ -1,59 +1,23 @@
 """
 REST API routes:
-  GET  /api/filters          — get current filter criteria
-  POST /api/filters          — update filter criteria (live)
   GET  /api/historical/{ticker}/{timeframe}  — chart initialization data
   GET  /api/stocks           — debug: list all tracked tickers
-  POST /api/test/alert       — dev: fire a fake alert for testing
 """
-import json
 import logging
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from scanner.scanner_engine import FilterCriteria, get_criteria, set_criteria
 from scanner.stock_state import STOCKS
 from services.ibkr_client import get_bars, get_ib
-from services.redis_client import get_redis
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 ET = timezone(timedelta(hours=-4))
-
-
-# ---------------------------------------------------------------------------
-# Filter criteria (Pydantic model mirrors the dataclass)
-# ---------------------------------------------------------------------------
-
-class FilterCriteriaModel(BaseModel):
-    price_min: Optional[float] = 0.10
-    price_max: Optional[float] = 25.0
-    float_max: Optional[int] = 30_000_000
-    volume_min: Optional[int] = 100_000
-    relvol_min: Optional[float] = 5.0
-    change_pct_min: Optional[float] = None
-    change_pct_max: Optional[float] = None
-    has_news: Optional[bool] = None
-    sort_by: str = "rel_vol"
-    sort_desc: bool = True
-
-
-@router.get("/filters")
-def get_filters():
-    c = get_criteria()
-    return c.__dict__
-
-
-@router.post("/filters")
-def update_filters(body: FilterCriteriaModel):
-    set_criteria(FilterCriteria(**body.model_dump()))
-    return {"status": "updated"}
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +95,66 @@ def update_scanner_params(body: ScannerParamsModel):
 
 
 # ---------------------------------------------------------------------------
+# DAS Trader Remote API — symbol routing
+# ---------------------------------------------------------------------------
+
+class DasSymbolBody(BaseModel):
+    ticker: str
+
+@router.post("/das/symbol")
+def das_set_symbol(body: DasSymbolBody):
+    ticker = body.ticker.upper().strip()
+    from services.das_client import set_symbol, is_connected
+    if not is_connected():
+        return {"status": "disconnected", "ticker": ticker}
+    ok = set_symbol(ticker)
+    return {"status": "ok" if ok else "error", "ticker": ticker}
+
+@router.get("/das/status")
+def das_status():
+    from services.das_client import is_connected
+    from config import DAS_HOST, DAS_PORT
+    return {"connected": is_connected(), "host": DAS_HOST, "port": DAS_PORT}
+
+@router.get("/das/test")
+def das_test(cmd: str = "SYMBOL AAPL"):
+    """Debug: send raw command to DAS and return response. E.g. /api/das/test?cmd=SYMBOL+AAPL"""
+    from services.das_client import raw_test
+    return raw_test(cmd)
+
+
+# ---------------------------------------------------------------------------
+# Market indices (NASDAQ, S&P 500, DOW) — cached 30 seconds
+# ---------------------------------------------------------------------------
+
+_indices_cache: dict = {"data": {}, "ts": 0.0}
+
+@router.get("/market/indices")
+async def market_indices():
+    import time
+    import yfinance as yf
+    now = time.time()
+    if now - _indices_cache["ts"] < 30 and _indices_cache["data"]:
+        return _indices_cache["data"]
+
+    symbols = {"NASDAQ": "^IXIC", "S&P 500": "^GSPC", "DOW": "^DJI"}
+    result: dict = {}
+    for name, sym in symbols.items():
+        try:
+            fi = yf.Ticker(sym).fast_info
+            price = fi.last_price
+            prev  = fi.previous_close
+            chg   = ((price - prev) / prev * 100) if prev else 0.0
+            result[name] = {"price": round(price, 2), "change_pct": round(chg, 2)}
+        except Exception:
+            result[name] = {"price": None, "change_pct": None}
+
+    _indices_cache["data"] = result
+    _indices_cache["ts"]   = now
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Market calendar (today's session open/close, handles early closes)
 # ---------------------------------------------------------------------------
 
@@ -180,24 +204,3 @@ def list_stocks():
         "count": len(STOCKS),
         "tickers": sorted(STOCKS.keys())[:200],
     }
-
-
-@router.post("/test/alert")
-async def fire_test_alert(ticker: str = "ABCD"):
-    """Fire a fake alert on the alerts channel — useful for frontend testing."""
-    redis = get_redis()
-    alert = {
-        "id": str(uuid.uuid4()),
-        "ticker": ticker.upper(),
-        "alert_type": "volume_breakout",
-        "price": 3.45,
-        "volume": 2_500_000,
-        "rel_vol": 12.5,
-        "change_pct": 18.2,
-        "float": 5_000_000,
-        "has_news": True,
-        "timestamp": int(time.time() * 1000),
-        "bars_1m": [],
-    }
-    await redis.publish("alerts:new", json.dumps(alert))
-    return {"status": "fired", "alert": alert}

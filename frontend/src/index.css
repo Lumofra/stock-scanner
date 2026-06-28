@@ -27,3 +27,11 @@ body {
 
 .green { color: #26a69a; }
 .red   { color: #ef5350; }
+
+@keyframes row-flash {
+  0%   { background-color: rgba(250, 210, 60, 0.18); }
+  100% { background-color: transparent; }
+}
+.row-flash {
+  animation: row-flash 1.4s ease-out forwards;
+}
